@@ -8,3 +8,11 @@ data/
 *.db-shm
 secrets.json
 .pytest_cache/
+.agent/
+superseded/
+AGENTS.md
+RECONFORGE_OBSIDIAN_NOTES.md
+reconforge_source.txt
+update_ui.py
+build_reconforge_zip.sh
+*.zip
