@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ title }} - ReconForge</title>
-<link rel="stylesheet" href="/static/style.css?v=5.0">
+<link rel="stylesheet" href="/static/style.css?v=6.0">
 </head>
 <body data-page="{{ page }}" data-pid="{{ pid if pid is not none else '' }}" data-sid="{{ sid if sid is not none else '' }}">
 <div class="app-shell">
@@ -86,7 +86,10 @@
       <span class="rail-status-text">Scanner Idle</span>
     </div>
 
-    <p class="rail-note">v1.0.0 · Local only (127.0.0.1)</p>
+    <div class="rail-credit">
+      <p class="rail-note">v1.0.0 · Local only</p>
+      <p class="rail-author">By <a href="https://github.com/anilkashyap01" target="_blank" rel="noopener noreferrer">Anil Kashyap</a></p>
+    </div>
   </nav>
 
   <div class="workspace">
@@ -121,6 +124,6 @@
   </div>
 </div>
 <div id="toast" role="status" aria-live="polite"></div>
-<script src="/static/app.js?v=5.0"></script>
+<script src="/static/app.js?v=6.0"></script>
 </body>
 </html>

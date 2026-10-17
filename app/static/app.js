@@ -519,30 +519,35 @@ pages.overview = async () => {
     return;
   }
 
-  // 2. Row 1: 4 Top Stat KPI Cards
+  // Target URL for live scanning
+  const liveScanHref = (o.recent_scans && o.recent_scans.length)
+    ? "/scans/" + o.recent_scans[0].id
+    : (activePid ? "/projects/" + activePid + "/scan" : "/scans");
+
+  // 2. Row 1: 4 Top Stat KPI Cards (Clickable)
   const statCards = h("div", { class: "stat-grid-4" },
-    h("div", { class: "stat-card" },
+    h("a", { class: "stat-card clickable", href: "/projects", title: "View and manage targets & scopes" },
       h("div", { class: "stat-icon" }, svgIcon(ICONS.target, 22)),
       h("div", { class: "stat-info" },
         h("span", { class: "stat-value" }, String(o.projects || 0)),
         h("span", { class: "stat-label" }, "Total Targets")
       )
     ),
-    h("div", { class: "stat-card" },
+    h("a", { class: "stat-card clickable", href: "/assets", title: "View discovered subdomains and assets" },
       h("div", { class: "stat-icon" }, svgIcon(ICONS.assets, 22)),
       h("div", { class: "stat-info" },
         h("span", { class: "stat-value" }, String(o.assets || 0)),
         h("span", { class: "stat-label" }, "Subdomains & Assets")
       )
     ),
-    h("div", { class: "stat-card" },
+    h("a", { class: "stat-card clickable", href: "/assets", title: "View discovered HTTP endpoints" },
       h("div", { class: "stat-icon" }, svgIcon(ICONS.overview, 22)),
       h("div", { class: "stat-info" },
         h("span", { class: "stat-value" }, String(o.endpoints || 0)),
         h("span", { class: "stat-label" }, "HTTP Endpoints")
       )
     ),
-    h("div", { class: "stat-card" },
+    h("a", { class: "stat-card clickable", href: liveScanHref, title: "Open live scanning & execution matrix" },
       h("div", { class: "stat-icon" }, svgIcon(ICONS.scans, 22)),
       h("div", { class: "stat-info" },
         h("span", { class: "stat-value" }, o.active_scans ? String(o.active_scans) + " Active" : (o.assets ? "1 Live" : "0")),
@@ -552,25 +557,25 @@ pages.overview = async () => {
   );
   app.append(statCards);
 
-  // 3. Row 2: 5 Severity Breakdown Cards
+  // 3. Row 2: 5 Severity Breakdown Cards (Clickable)
   const sevCards = h("div", { class: "sev-grid-5" },
-    h("div", { class: "sev-card sev-total" },
+    h("a", { class: "sev-card sev-total clickable", href: "/findings", title: "View all findings" },
       h("div", { class: "sev-card-label" }, h("span", { class: "sev-dot total" }), "Total Findings"),
       h("span", { class: "sev-card-val mono" }, String(total))
     ),
-    h("div", { class: "sev-card sev-crit" },
+    h("a", { class: "sev-card sev-crit clickable", href: "/findings?severity=critical", title: "Filter Critical findings" },
       h("div", { class: "sev-card-label" }, h("span", { class: "sev-dot critical" }), "Critical"),
       h("span", { class: "sev-card-val mono", style: "color:var(--critical)" }, String(o.findings_by_severity.critical || 0))
     ),
-    h("div", { class: "sev-card sev-high" },
+    h("a", { class: "sev-card sev-high clickable", href: "/findings?severity=high", title: "Filter High findings" },
       h("div", { class: "sev-card-label" }, h("span", { class: "sev-dot high" }), "High"),
       h("span", { class: "sev-card-val mono", style: "color:var(--high)" }, String(o.findings_by_severity.high || 0))
     ),
-    h("div", { class: "sev-card sev-med" },
+    h("a", { class: "sev-card sev-med clickable", href: "/findings?severity=medium", title: "Filter Medium findings" },
       h("div", { class: "sev-card-label" }, h("span", { class: "sev-dot medium" }), "Medium"),
       h("span", { class: "sev-card-val mono", style: "color:var(--medium)" }, String(o.findings_by_severity.medium || 0))
     ),
-    h("div", { class: "sev-card sev-low" },
+    h("a", { class: "sev-card sev-low clickable", href: "/findings?severity=low", title: "Filter Low findings" },
       h("div", { class: "sev-card-label" }, h("span", { class: "sev-dot low" }), "Low"),
       h("span", { class: "sev-card-val mono", style: "color:var(--low)" }, String(o.findings_by_severity.low || 0))
     )
@@ -589,7 +594,7 @@ pages.overview = async () => {
         order.map((s) => {
           const count = o.findings_by_severity[s] || 0;
           const pct = total ? Math.round((count / total) * 100) : 0;
-          return h("div", { class: "donut-legend-item" },
+          return h("a", { class: "donut-legend-item clickable-row", href: "/findings?severity=" + s, title: "Filter " + s + " findings" },
             h("div", { class: "donut-legend-left" },
               h("span", { class: "sev-dot " + s }),
               h("span", { style: "text-transform:capitalize" }, s)
@@ -604,9 +609,11 @@ pages.overview = async () => {
   const cardRadar = h("div", { class: "card" },
     h("div", { class: "card-header" },
       h("h3", { class: "card-title" }, svgIcon(ICONS.radar, 18), "Radar & Surveillance HUD"),
-      h("span", { class: "chip chip-safe" }, "Loopback Only")
+      h("a", { class: "small", href: liveScanHref }, (o.active_scans || 0) > 0 ? "View live \u2192" : "Live scans \u2192")
     ),
-    renderOverviewRadarHUD(o, activePid)
+    h("a", { class: "radar-wrap-link", href: liveScanHref, title: "Open live scanner & execution matrix" },
+      renderOverviewRadarHUD(o, activePid)
+    )
   );
 
   const recentScansList = o.recent_scans || [];
@@ -617,7 +624,7 @@ pages.overview = async () => {
     ),
     h("div", { class: "activity-feed" },
       recentScansList.length
-        ? recentScansList.slice(0, 3).map((s) => h("div", { class: "activity-item" },
+        ? recentScansList.slice(0, 3).map((s) => h("a", { class: "activity-item clickable-row", href: "/scans/" + s.id, title: "Open scan #" + s.id },
             h("div", { class: "activity-icon-wrap" }, svgIcon(ICONS.radar, 14)),
             h("div", { class: "activity-content" },
               h("div", { class: "activity-title" }, "Scan #" + s.id + " (" + s.profile + ") - " + s.project),
@@ -628,7 +635,7 @@ pages.overview = async () => {
               h("span", { class: "activity-time" }, ago(s.completed_at || s.created_at))
             )
           ))
-        : h("div", { class: "activity-item" },
+        : h("a", { class: "activity-item clickable-row", href: "/projects", title: "View projects & scopes" },
             h("div", { class: "activity-icon-wrap" }, svgIcon(ICONS.projects, 14)),
             h("div", { class: "activity-content" },
               h("div", { class: "activity-title" }, "Target Scope Initialized"),
@@ -1664,11 +1671,14 @@ pages.assets = async () => {
 pages.findings = async () => {
   const params = new URLSearchParams(location.search);
   let activeId = params.get("open") || null;
-  const sel = await projectSelect("", () => load());
+  const initialSev = params.get("severity") || "";
+  const initialProj = params.get("project_id") || "";
+  const sel = await projectSelect(initialProj, () => load());
   const sevSel = h("select", { onchange: () => { updatePills(); load(); } },
     h("option", { value: "" }, "All severities"),
-    ["critical", "high", "medium", "low", "info"].map((s) => h("option", { value: s }, s))
+    ["critical", "high", "medium", "low", "info"].map((s) => h("option", { value: s, selected: s === initialSev }, s))
   );
+  if (initialSev) sevSel.value = initialSev;
   const stSel = h("select", { onchange: () => load() },
     h("option", { value: "" }, "Any status"),
     Object.entries(VALID).map(([k, v]) => h("option", { value: k }, v))
@@ -1982,6 +1992,24 @@ pages.settings = async () => {
         s.wordlist_dirs.length
           ? s.wordlist_dirs.map((d, idx) => h("span", {}, idx ? ", " : "", h("code", {}, d)))
           : "no directory configured (set RECONFORGE_WORDLIST_DIRS)"
+      )
+    ),
+    h("h2", { style: "margin-top:var(--sp-5)" }, "About & Developer"),
+    h("div", { class: "panel" },
+      h("div", { class: "bar", style: "margin-top:0;justify-content:space-between;flex-wrap:wrap" },
+        h("div", {},
+          h("h3", { style: "margin:0 0 4px" }, "ReconForge v1.0.0"),
+          h("p", { class: "muted small", style: "margin:0" }, "Local-first attack surface & reconnaissance orchestration platform.")
+        ),
+        h("span", { class: "chip chip-safe" }, "Developed by Anil Kashyap")
+      ),
+      h("div", { class: "bar", style: "margin-top:var(--sp-3);gap:var(--sp-3)" },
+        h("a", { class: "btn secondary sm", href: "https://github.com/anilkashyap01", target: "_blank", rel: "noopener noreferrer" },
+          svgIcon(ICONS.terminal, 14), "GitHub: anilkashyap01"
+        ),
+        h("a", { class: "btn secondary sm", href: "https://linkedin.com/in/anilkashyap01", target: "_blank", rel: "noopener noreferrer" },
+          svgIcon(ICONS.target, 14), "LinkedIn: anilkashyap01"
+        )
       )
     )
   );
