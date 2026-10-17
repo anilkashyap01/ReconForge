@@ -436,7 +436,7 @@ function renderDonutChart(bySev, total) {
 
 function renderOverviewRadarHUD(o, activePid) {
   const isScanning = (o.active_scans || 0) > 0;
-  const recentScan = (o.recent_scans && o.recent_scans.length) ? o.recent_scans[0] : null;
+  const projectName = (o.recent_scans && o.recent_scans.length) ? o.recent_scans[0].project : (activePid ? "Project #" + activePid : "Authorised Scope");
 
   const radarScreen = h("div", { class: "radar-screen" },
     h("div", { class: "radar-ring r1" }),
@@ -453,7 +453,7 @@ function renderOverviewRadarHUD(o, activePid) {
 
   const statusText = isScanning
     ? "ACTIVE SURFACE RECON SCANNING"
-    : (recentScan ? "RADAR SURVEILLANCE STANDBY" : "RADAR ENGINE READY - SCOPE MONITORED");
+    : "RADAR SURVEILLANCE STANDBY";
 
   const telemetry = h("div", { class: "radar-telemetry" },
     h("div", { class: "radar-telemetry-head" },
@@ -469,7 +469,7 @@ function renderOverviewRadarHUD(o, activePid) {
     h("div", { class: "radar-data-grid" },
       h("div", { class: "radar-data-item" },
         h("span", { class: "radar-data-label" }, "Target Scope"),
-        h("span", { class: "radar-data-val mono" }, recentScan ? recentScan.project : (activePid ? "Project #" + activePid : "Authorised Only"))
+        h("span", { class: "radar-data-val mono" }, projectName)
       ),
       h("div", { class: "radar-data-item" },
         h("span", { class: "radar-data-label" }, "Discovered Assets"),
@@ -487,13 +487,7 @@ function renderOverviewRadarHUD(o, activePid) {
         h("span", { class: "radar-data-label" }, "Sensors"),
         h("span", { class: "radar-data-val" }, "11 Tool Adapters")
       )
-    ),
-    recentScan ? h("div", { class: "bar", style: "margin:var(--sp-2) 0 0;justify-content:space-between" },
-      h("span", { class: "small muted" },
-        "Latest Run: Scan #" + recentScan.id + " (" + recentScan.profile + ") \u00B7 " + (STATUS[recentScan.status] || recentScan.status)
-      ),
-      h("a", { class: "btn primary sm", href: "/scans/" + recentScan.id }, svgIcon(ICONS.radar, 14), "Inspect Pipeline Matrix \u2192")
-    ) : null
+    )
   );
 
   return h("div", { class: "radar-container" }, radarScreen, telemetry);
