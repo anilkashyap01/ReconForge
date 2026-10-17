@@ -1,0 +1,627 @@
+=== FILE: AGENTS.md ===
+# AGENTS.md: ReconForge
+
+Instructions for AI coding agents (Antigravity, Claude Code, Cursor, Codex) continuing this project.
+Read this fully before changing code. The safety rules are not optional.
+
+## What this is
+ReconForge is a local-first recon and vulnerability-assessment platform: FastAPI + Jinja2 + vanilla JS + SQLite. It orchestrates
+external tools the user installs (Subfinder, dnsx, httpx, Naabu, Katana, Nuclei; optional Nmap, ZAP, FFUF, gau, testssl.sh), parses their
+output into SQLite, and shows it in a dashboard on 127.0.0.1. Owner: Dora, cybersecurity fresher, Kali Linux. Full user docs: README.md.
+
+## Non-negotiable rules
+1. **Scope is enforced in backend code, never only in the UI.** Every host, URL and finding is filtered through `Scope` before storage, and the
+   exact target list is re-validated right before each launch (`ScanRun.revalidate`). Do not add a code path that skips either.
+2. **No shell.** Tools run via `asyncio.create_subprocess_exec` with argv lists (`app/services/runner.py`). Never `shell=True`, `os.system`, or string-built commands.
+   User-supplied values that reach argv must pass a validator in `app/scope.py` (`validate_port_spec`, `validate_ident_list`, `safe_path_under`, scope parsing).
+3. **Never launch destructive, DoS, brute-force or intrusive checks automatically.** Nuclei excludes those tags; FFUF/ZAP are opt-in, Web profile only, and need the active-testing confirmation.
+4. **Conservative defaults** (2 req/s, 1 target-touching tool at a time). Do not raise defaults. Never claim a rate limit is enforced where only a tool flag is passed.
+   Never rotate API keys or identities to evade provider limits; honour 429 and Retry-After.
+5. **Never fabricate data.** No fake metrics, hardcoded findings or invented provider responses. Show real DB values or an empty state.
+6. **Scanner matches are potential findings** (`validation_status='unvalidated'`) until an analyst confirms them. Never describe a detection as confirmed.
+7. **Secrets** live only in `data/secrets.json` (0600) via `SecretStore`. Keep them out of logs, reports, templates, JS, error text, and the scanner environment (`redact()`, `safe_env()`).
+8. **No third-party uploads** of scan data without explicit opt-in. Provider calls send only in-scope hostnames/IPs.
+9. **Never write code that attacks, exploits, or targets anything.** This tool only wraps scanners for authorised testing.
+10. Bind to loopback only. Keep the Host-header allow-list and the `X-ReconForge` CSRF check in `app/main.py`.
+
+## Commands
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt
+python -m pytest -q            # must pass before you finish; currently 111 tests
+python -m app                  # http://127.0.0.1:8000
+```
+Tests use stub executables (`tests/conftest.py`, fixture `fake_tools`) and temp data dirs. **Tests must never run a real scan or touch the network.**
+
+## Map
+- `app/main.py` routes, security middleware, JSON API. `app/static/app.js` + `style.css`, `app/templates/` (shell.html, report.html).
+- `app/scope.py` scope parsing/validation (exact `example.com` vs wildcard `*.example.com`, IPs/CIDRs, exclusions, revalidation).
+- `app/rate_limiter.py` token buckets, host budgets, retry policy, `plan_tool_rate`. `app/config.py` settings, `Limits`, hard maxima, `SecretStore`.
+- `app/database.py` schema (CREATE IF NOT EXISTS; there is no migration system) and helpers. `app/models.py` request models, record dataclasses, status enums.
+- `app/adapters/` one class per tool: `build()` returns `Command`s (argv, targets, target_kind, stdin), `parse()` returns `ParseResult`. Live code is `discovery.py`, `assessment.py`.
+  `superseded/` holds old unused adapters; ignore it.
+- `app/services/pipeline.py` stage plan, `ScanRun` (inputs, scope filter, cache, retries, persistence, finalize). `store.py` dedup upserts and compare. `runner.py` subprocess runner.
+  `tools.py` detection. `providers.py` Shodan/urlscan. `reports.py` HTML/JSON reports. `app/scheduler.py` queue and the shared target semaphore.
+
+## Conventions
+- Typed Python, small functions, clear errors. Parsers must tolerate bad lines and never raise on tool output.
+- Stage status vocabulary (keep distinct): completed, empty, partial, failed, missing_tool, skipped, cached, cancelled. A timeout is `partial`, never `failed`, and is never retried.
+- Cached stages never refresh `last_seen` and are never evidence. Only subfinder, gau, dnsx are cacheable.
+- Resolved IPs are scanned only if explicitly in scope or the user opts in (`allow_resolved_ips`). Hosted platforms (Vercel, Netlify, Cloudflare...) are not the site owner's to authorise.
+- Frontend: build DOM with `h()` and text nodes only. **Never use innerHTML with data.** Report HTML relies on Jinja autoescape.
+- The app sends `Content-Security-Policy: default-src 'self'`, which **blocks inline `style="..."` attributes and inline scripts/styles in markup**. Style with CSS classes, or set `el.style.*` / `el.style.cssText` from JS (`h()` does this for the `style` prop).
+  Use CSS custom properties set via `el.style.setProperty` for dynamic widths. The report page is the only place with inline `<style>` (its own CSP allows it, no scripts).
+- Database changes: add columns/tables with `IF NOT EXISTS` style code; changing a UNIQUE constraint needs a real table-rebuild migration that preserves existing user data.
+
+## Adding or changing a tool adapter
+1. Add the class and register it in `app/adapters/__init__.py`; give it a `ToolSpec` (identity regex so a same-named wrong program is rejected).
+2. `build()`: argv list only, feed targets via stdin or validated args, set `target_kind`, honour `ctx.rate`.
+3. `parse()`: fixture-tested, scope-agnostic (the pipeline filters scope).
+4. Add the stage to `STAGES` / `plan_stages` / `inputs_for` in `pipeline.py` with an honest `traffic_note`.
+5. Tests: command construction (`tests/test_commands.py`), parser fixture (`tests/test_parsers.py`), and a stub binary if it joins the e2e flow.
+
+## Known issues and next work (highest value first)
+1. **Verify adapters against real tool versions.** Only httpx, dnsx, naabu, nuclei were exercised for real (Naabu 2.6.1, httpx 1.9.0, dnsx 1.3.1, Nuclei 3.11.1); Subfinder, Katana, Nmap, FFUF, gau, testssl, ZAP never ran for real.
+   Riskiest flags: nuclei `-irr`, `-etags`, `-bs`; katana `-fs fqdn`, `-ef`; naabu `-ec`; ZAP `-quickurl/-quickout`; testssl `--jsonfile`.
+2. **Nuclei coverage.** A real unfiltered run timed out at 900 s with no output at 2 req/s. Ideas: estimate request count before launch, show progress (nuclei stats), split work into chunks so
+   partial coverage is recorded, resume after timeout. Wizard now defaults tags to `exposure,misconfig,takeover` (tag names unverified; check with `nuclei -tgl`).
+3. (Done) Ports are now stored per host+IP+port with a migration, and each tool run keeps its exact command, exit code, stderr tail and a redacted head of its output (scan page, "Tool runs").
+   Still open: a real scan once showed Naabu "8 results" but 2 stored rows. Re-run it and compare with the saved raw output.
+4. Keep more raw output than the 6000-character head if debugging needs it (cap and redact).
+5. Verify Kali package names (only `katana` was confirmed); update `kali_package` in the adapters and the README table.
+6. Pause is between stages only. Per-host budgets are via tool flags only. Censys is not implemented (verify its documented API before adding).
+7. Stages with partial results and items>0 are not re-run by Retry.
+
+## Working style for agents
+- Inspect before editing; keep changes small; run `python -m pytest -q` and fix failures before declaring done.
+- Do not run the server in the background with `pkill -f` patterns that match your own shell command.
+- Python `httpx` (a dev dependency) installs an `httpx` command in the venv; ReconForge strips the venv from the tool PATH. Do not "fix" that.
+- If you cannot verify something (tool flags, package names, API behaviour), say so in code comments and the README instead of guessing.
+
+=== FILE: app/templates/shell.html ===
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }} - ReconForge</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-page="{{ page }}" data-pid="{{ pid if pid is not none else '' }}" data-sid="{{ sid if sid is not none else '' }}">
+<nav class="rail" aria-label="Main">
+  <a class="brand" href="/">ReconForge</a>
+  <a href="/" data-nav="overview">Overview</a>
+  <a href="/projects" data-nav="projects project wizard">Projects</a>
+  <a href="/scans" data-nav="scans scan">Scan history</a>
+  <a href="/assets" data-nav="assets">Assets</a>
+  <a href="/findings" data-nav="findings">Findings</a>
+  <a href="/tools" data-nav="tools">Tool health</a>
+  <a href="/settings" data-nav="settings">Settings</a>
+  <p class="rail-note">Local only. Bound to 127.0.0.1. Scan only what you are authorised to test.</p>
+</nav>
+<main id="app" class="main"><p class="muted">Loading</p></main>
+<div id="toast" role="status" aria-live="polite"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
+
+=== FILE: app/static/style.css ===
+:root{--bg:#e9eef1;--panel:#f8fafb;--panel2:#eef2f5;--ink:#16232c;--muted:#52636f;--line:#cbd5db;--accent:#0b6e85;--accent-ink:#fff;
+--critical:#a3122a;--high:#c2410c;--medium:#a16207;--low:#2f6f9f;--info:#5b6b77;--ok:#1f7a4d;--bad:#a3122a;--warn:#a16207;
+--mono:ui-monospace,"DejaVu Sans Mono",Menlo,Consolas,monospace;--sans:ui-sans-serif,"Segoe UI","Noto Sans","DejaVu Sans",sans-serif}
+@media (prefers-color-scheme:dark){:root{--bg:#0f171d;--panel:#16222a;--panel2:#1b2a34;--ink:#e3eaee;--muted:#9aabb6;--line:#2a3a45;--accent:#4fb4cf;--accent-ink:#06222b;
+--critical:#ff6b81;--high:#ff9a5c;--medium:#e9b949;--low:#69a9d8;--info:#9aabb6;--ok:#5fcf99;--bad:#ff6b81;--warn:#e9b949}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 var(--sans);display:flex;min-height:100vh}
+.rail{width:200px;flex:none;background:var(--panel);border-right:1px solid var(--line);padding:18px 12px;display:flex;flex-direction:column;gap:2px;position:sticky;top:0;height:100vh}
+.brand{font-weight:700;font-size:18px;color:var(--ink);text-decoration:none;padding:4px 10px 16px}
+.rail a:not(.brand){color:var(--ink);text-decoration:none;padding:7px 10px;border-radius:4px;border-left:3px solid transparent}
+.rail a:not(.brand):hover{background:var(--panel2)}.rail a.on{background:var(--panel2);border-left-color:var(--accent);font-weight:600}
+.rail-note{margin-top:auto;font-size:12px;color:var(--muted);padding:0 10px}
+.main{flex:1;min-width:0;padding:26px 30px 60px;max-width:1280px}
+h1{font-size:24px;margin:0 0 4px}h2{font-size:17px;margin:26px 0 8px}h3{font-size:15px;margin:16px 0 6px}
+.muted{color:var(--muted)}.small{font-size:13px}.mono,code,pre{font-family:var(--mono);font-size:13px}
+a{color:var(--accent)}p{margin:6px 0}
+.bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0}.bar .grow{flex:1}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:14px 16px;margin:10px 0}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px}
+.tile{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px 14px}.tile b{display:block;font-size:26px;line-height:1.1}.tile span{color:var(--muted);font-size:13px}
+table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);font-size:14px}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-weight:600;background:var(--panel2);white-space:nowrap}
+th.sortable{cursor:pointer}tr.row{cursor:pointer}tr.row:hover td{background:var(--panel2)}tr.sel td{background:var(--panel2)}
+.wrap{overflow-x:auto}
+button,.btn{font:inherit;border:1px solid var(--line);background:var(--panel);color:var(--ink);padding:6px 12px;border-radius:4px;cursor:pointer;text-decoration:none;display:inline-block}
+button:hover,.btn:hover{background:var(--panel2)}button.primary,.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:600}
+button.danger{color:var(--bad);border-color:var(--bad)}button:disabled{opacity:.5;cursor:not-allowed}
+input,select,textarea{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:6px 8px;max-width:100%}
+textarea{width:100%;min-height:90px;font-family:var(--mono);font-size:13px}label.f{display:block;margin:10px 0 2px;font-weight:600}.hint{color:var(--muted);font-size:13px;margin:2px 0 4px}
+.chk{display:flex;gap:8px;align-items:flex-start;margin:6px 0}.chk input{margin-top:4px}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:2px 20px}
+.pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;border:1px solid currentColor;white-space:nowrap}
+.s-completed,.s-ok{color:var(--ok)}.s-failed,.s-missing_tool,.s-bad{color:var(--bad)}.s-partial,.s-warn,.s-paused,.s-completed_with_issues{color:var(--warn)}
+.s-running,.s-queued{color:var(--accent)}.s-skipped,.s-pending,.s-empty,.s-cancelled,.s-cached{color:var(--muted)}
+.sev{font-weight:700}.sev-critical{color:var(--critical)}.sev-high{color:var(--high)}.sev-medium{color:var(--medium)}.sev-low{color:var(--low)}.sev-info{color:var(--info)}
+.sevbar{display:flex;height:10px;border-radius:5px;overflow:hidden;background:var(--panel2);margin:8px 0}.sevbar i{display:block}
+.i-critical{background:var(--critical)}.i-high{background:var(--high)}.i-medium{background:var(--medium)}.i-low{background:var(--low)}.i-info{background:var(--info)}
+.ladder{list-style:none;margin:0;padding:0}.ladder li{display:grid;grid-template-columns:34px 1fr auto;gap:2px 12px;padding:10px 12px;border:1px solid var(--line);border-bottom:0;background:var(--panel)}
+.ladder li:last-child{border-bottom:1px solid var(--line)}.ladder .n{grid-row:1/3;font-family:var(--mono);color:var(--muted);font-size:18px;padding-top:2px}
+.ladder .msg{grid-column:2/4;font-size:13px;color:var(--muted)}.ladder li.running{border-left:4px solid var(--accent)}
+pre.log{background:var(--panel);border:1px solid var(--line);padding:10px;max-height:300px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:6px 0}
+pre.ev{background:var(--panel2);border:1px solid var(--line);padding:10px;white-space:pre-wrap;word-break:break-word;max-height:360px;overflow:auto}
+.split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,420px);gap:16px;align-items:start}@media (max-width:1100px){.split{grid-template-columns:1fr}}
+.empty{border:1px dashed var(--line);border-radius:6px;padding:26px;text-align:center;color:var(--muted);background:var(--panel)}
+.notice{border-left:4px solid var(--warn);background:var(--panel);padding:10px 14px;margin:10px 0;border-radius:0 4px 4px 0}.notice.bad{border-color:var(--bad)}.notice.ok{border-color:var(--ok)}
+#toast{position:fixed;right:16px;bottom:16px;display:flex;flex-direction:column;gap:8px;z-index:9}#toast div{background:var(--ink);color:var(--bg);padding:9px 14px;border-radius:4px;max-width:420px}#toast .err{background:var(--bad);color:#fff}
+@media (max-width:820px){body{flex-direction:column}.rail{width:auto;height:auto;position:static;flex-direction:row;flex-wrap:wrap;padding:8px}.brand{padding:6px 10px}.rail-note{display:none}.main{padding:16px 14px 50px}}
+
+=== FILE: app/static/app.js ===
+"use strict";
+/* ReconForge dashboard. All data is inserted with textContent / text nodes, never innerHTML. */
+const app = document.getElementById("app");
+const ctx = document.body.dataset;
+
+function h(tag, props, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (v === null || v === undefined || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (k === "style") el.style.cssText = v;   // CSSOM is allowed by our CSP; a style="" attribute set via setAttribute is blocked
+    else if (k === "value") el.value = v;
+    else if (k === "checked") el.checked = !!v;
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const kid of kids.flat(2)) {
+    if (kid === null || kid === undefined || kid === false) continue;
+    el.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+  }
+  return el;
+}
+async function api(path, method = "GET", payload) {
+  const opt = { method, headers: { "X-ReconForge": "1" } };
+  if (payload !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(payload); }
+  const r = await fetch(path, opt);
+  let data = null;
+  try { data = await r.json(); } catch (e) { /* no body */ }
+  if (!r.ok) {
+    let msg = data && data.detail;
+    if (Array.isArray(msg)) msg = msg.map((x) => (x.loc ? x.loc.slice(1).join(".") + ": " : "") + x.msg).join("; ");
+    throw new Error(msg || "Request failed (" + r.status + ")");
+  }
+  return data;
+}
+function toast(msg, err) {
+  const t = document.getElementById("toast");
+  const d = h("div", { class: err ? "err" : "" }, msg);
+  t.append(d);
+  setTimeout(() => d.remove(), err ? 9000 : 3500);
+}
+const attempt = (fn) => async (...a) => { try { await fn(...a); } catch (e) { toast(e.message, true); } };
+const clear = (el) => { while (el.firstChild) el.removeChild(el.firstChild); return el; };
+const fmtTime = (s) => (s ? new Date(s).toLocaleString() : "");
+function ago(s) {
+  if (!s) return "";
+  const sec = Math.max(0, (Date.now() - new Date(s).getTime()) / 1000);
+  if (sec < 90) return "just now";
+  if (sec < 5400) return Math.round(sec / 60) + " min ago";
+  if (sec < 172800) return Math.round(sec / 3600) + " h ago";
+  return Math.round(sec / 86400) + " days ago";
+}
+const STATUS = { pending: "Waiting", running: "Running", completed: "Completed", empty: "Completed, nothing found", partial: "Partial results",
+  failed: "Failed", missing_tool: "Tool missing", skipped: "Skipped", cached: "Cached", cancelled: "Cancelled", queued: "Queued", paused: "Paused",
+  completed_with_issues: "Completed with issues" };
+const pill = (s) => h("span", { class: "pill s-" + s }, STATUS[s] || s);
+const sev = (s) => h("span", { class: "sev sev-" + s }, s);
+const VALID = { unvalidated: "Potential (unvalidated)", confirmed: "Confirmed by analyst", false_positive: "False positive", accepted_risk: "Accepted risk", fixed: "Fixed" };
+const link = (href, text) => h("a", { href }, text);
+const empty = (msg, ...extra) => h("div", { class: "empty" }, h("p", {}, msg), ...extra);
+function table(heads, rows, opts = {}) {
+  const t = h("table", {}, h("thead", {}, h("tr", {}, heads.map((x) => {
+    const label = typeof x === "string" ? x : x.label;
+    const th = h("th", { class: x.sort ? "sortable" : "" }, label);
+    if (x.sort && opts.onsort) th.addEventListener("click", () => opts.onsort(x.sort));
+    return th;
+  }))), h("tbody", {}, rows));
+  return h("div", { class: "wrap" }, t);
+}
+const field = (label, input, hint) => h("div", {}, h("label", { class: "f" }, label), hint ? h("div", { class: "hint" }, hint) : null, input);
+const check = (id, label, checked, hint) => h("label", { class: "chk" }, h("input", { type: "checkbox", id, checked }), h("span", {}, label, hint ? h("div", { class: "hint" }, hint) : null));
+const val = (id) => document.getElementById(id);
+async function projectSelect(selected, onchange) {
+  const ps = await api("/api/projects");
+  return h("select", { onchange }, h("option", { value: "" }, "All projects"),
+    ps.map((p) => h("option", { value: p.id, selected: String(p.id) === String(selected) }, p.name)));
+}
+
+/* ------------------------------------------------------------------ pages */
+const pages = {};
+
+pages.overview = async () => {
+  const o = await api("/api/overview");
+  const total = o.open_findings || 0;
+  const order = ["critical", "high", "medium", "low", "info"];
+  app.append(h("h1", {}, "Overview"), h("p", { class: "muted" }, "Everything below is read from the local database."));
+  if (!o.projects) {
+    app.append(empty("No projects yet. A project holds the scope you are authorised to test and every scan of it.", h("p", {}, link("/projects", "Create your first project"))));
+    return;
+  }
+  app.append(h("div", { class: "tiles" },
+    [["Projects", o.projects], ["Assets", o.assets], ["HTTP endpoints", o.endpoints], ["Open findings", o.open_findings], ["Active scans", o.active_scans]]
+      .map(([k, v]) => h("div", { class: "tile" }, h("b", {}, v), h("span", {}, k)))));
+  app.append(h("h2", {}, "Open findings by severity"));
+  if (!total) app.append(h("p", { class: "muted" }, "No open findings. This means none have been recorded, not that the targets are free of issues."));
+  else {
+    app.append(h("div", { class: "sevbar" }, order.filter((s) => o.findings_by_severity[s]).map((s) => h("i", { class: "i-" + s, style: "width:" + (100 * o.findings_by_severity[s] / total) + "%" }))));
+    app.append(h("p", {}, order.filter((s) => o.findings_by_severity[s]).map((s) => h("span", {}, sev(s), " " + o.findings_by_severity[s] + "   "))));
+  }
+  app.append(h("h2", {}, "Recent scans"));
+  app.append(o.recent_scans.length ? table(["Scan", "Project", "Profile", "Status", "Assets", "Findings", "Created"], o.recent_scans.map((s) => h("tr", {},
+    h("td", {}, link("/scans/" + s.id, "#" + s.id)), h("td", {}, link("/projects/" + s.project_id, s.project)), h("td", {}, s.profile), h("td", {}, pill(s.status)),
+    h("td", {}, s.summary.assets ?? ""), h("td", {}, s.summary.findings_by_severity ? Object.values(s.summary.findings_by_severity).reduce((a, b) => a + b, 0) : ""),
+    h("td", {}, ago(s.created_at))))) : h("p", { class: "muted" }, "No scans have been run."));
+};
+
+pages.projects = async () => {
+  const ps = await api("/api/projects");
+  app.append(h("h1", {}, "Projects"));
+  app.append(ps.length ? table(["Project", "Scope entries", "Assets", "Open findings", "Scans", "Created"], ps.map((p) => h("tr", {},
+    h("td", {}, link("/projects/" + p.id, p.name)), h("td", {}, p.scope_entries), h("td", {}, p.assets), h("td", {}, p.open_findings), h("td", {}, p.scans), h("td", {}, ago(p.created_at)))))
+    : empty("No projects yet."));
+  app.append(h("h2", {}, "New project"), h("div", { class: "panel" },
+    field("Name", h("input", { id: "p-name", maxlength: 100, size: 40 })),
+    field("Description", h("input", { id: "p-desc", size: 60 })),
+    field("Authorised scope, one per line", h("textarea", { id: "p-scope", placeholder: "example.com\n*.example.com\n203.0.113.10" }),
+      "example.com covers only that exact host. *.example.com covers its subdomains but not example.com itself. IP addresses and CIDR ranges must be listed explicitly. Nothing outside this list is ever tested."),
+    field("Exclusions, one per line (optional)", h("textarea", { id: "p-excl", placeholder: "admin.example.com" })),
+    check("p-auth", "I confirm I have permission to test every target listed above, and I will follow the program's rules and rate limits.", false),
+    field("Where is the permission documented? (optional)", h("input", { id: "p-note", size: 60, placeholder: "Bug bounty program URL, engagement ID" })),
+    h("div", { class: "bar" }, h("button", { class: "primary", onclick: attempt(async () => {
+      const split = (id) => val(id).value.split("\n").map((x) => x.trim()).filter(Boolean);
+      const r = await api("/api/projects", "POST", { name: val("p-name").value.trim(), description: val("p-desc").value, scope: split("p-scope"), exclusions: split("p-excl"),
+        authorization_confirmed: val("p-auth").checked, authorization_note: val("p-note").value });
+      location.href = "/projects/" + r.id;
+    }) }, "Create project"))));
+};
+
+pages.project = async () => {
+  const p = await api("/api/projects/" + ctx.pid);
+  const reload = () => location.reload();
+  const inc = p.scope.filter((e) => !e.excluded), exc = p.scope.filter((e) => e.excluded);
+  app.append(h("h1", {}, p.name), h("p", { class: "muted" }, p.description || ""));
+  app.append(h("div", { class: "bar" }, inc.length ? h("a", { class: "btn primary", href: "/projects/" + p.id + "/scan" }, "New scan") : h("span", { class: "muted" }, "Add an authorised scope entry to start a scan."),
+    h("span", { class: "grow" }), h("button", { class: "danger", onclick: attempt(async () => { if (confirm("Delete this project and all of its assets, findings and scan history?")) { await api("/api/projects/" + p.id, "DELETE"); location.href = "/projects"; } }) }, "Delete project")));
+  const row = (e) => h("tr", {}, h("td", { class: "mono" }, e.display), h("td", {}, e.kind), h("td", {}, e.excluded ? "excluded" : "authorised " + ago(e.authorized_at)), h("td", {}, e.authorization_note || ""),
+    h("td", {}, h("button", { onclick: attempt(async () => { await api("/api/projects/" + p.id + "/scope/" + e.id, "DELETE"); reload(); }) }, "Remove")));
+  app.append(h("h2", {}, "Scope"), p.scope.length ? table(["Entry", "Type", "State", "Permission note", ""], [...inc, ...exc].map(row)) : empty("No scope entries yet."));
+  app.append(h("div", { class: "panel" }, h("h3", {}, "Add scope"),
+    field("Entries, one per line", h("textarea", { id: "s-entries" })), check("s-excl", "These are exclusions (never tested)", false),
+    check("s-auth", "I confirm I have permission to test these targets.", false), field("Permission note (optional)", h("input", { id: "s-note", size: 50 })),
+    h("div", { class: "bar" }, h("button", { onclick: attempt(async () => {
+      await api("/api/projects/" + p.id + "/scope", "POST", { entries: val("s-entries").value.split("\n").map((x) => x.trim()).filter(Boolean), excluded: val("s-excl").checked,
+        authorization_confirmed: val("s-auth").checked, authorization_note: val("s-note").value });
+      reload();
+    }) }, "Add"))));
+  app.append(h("h2", {}, "Scans"), p.scans.length ? table(["Scan", "Profile", "Status", "Created", "Assets", "Findings"], p.scans.map((s) => h("tr", {}, h("td", {}, link("/scans/" + s.id, "#" + s.id)), h("td", {}, s.profile), h("td", {}, pill(s.status)),
+    h("td", {}, ago(s.created_at)), h("td", {}, s.summary.assets ?? ""), h("td", {}, s.summary.findings_by_severity ? Object.values(s.summary.findings_by_severity).reduce((a, b) => a + b, 0) : "")))) : empty("No scans yet."));
+};
+
+const PROFILE_INFO = {
+  passive: ["Passive Recon", "Public sources only. Sends nothing to the target. Finds subdomains of wildcard entries and, if enabled, historical URLs."],
+  standard: ["Standard Recon", "Adds DNS resolution, HTTP probing and port discovery. Sends DNS, HTTP and TCP traffic to authorised targets."],
+  vulnerability: ["Vulnerability Assessment", "Standard Recon plus Nuclei template checks (non-intrusive templates only). Needs a separate confirmation."],
+  web: ["Web Assessment", "Standard Recon plus crawling and Nuclei. Optional content discovery and ZAP. Needs a separate confirmation."],
+};
+const STAGE_LABEL = { subfinder: "Subfinder", gau: "gau", dnsx: "dnsx", httpx: "httpx", naabu: "Naabu", nmap: "Nmap", katana: "Katana", ffuf: "FFUF", testssl: "testssl.sh", zap: "ZAP", nuclei: "Nuclei", enrichment: "Provider enrichment" };
+function planStages(profile, o) {
+  const s = ["subfinder"]; if (o.enable_gau) s.push("gau");
+  if (profile !== "passive") {
+    s.push("dnsx", "httpx", "naabu"); if (o.enable_nmap) s.push("nmap"); if (profile === "web") s.push("katana"); if (o.enable_ffuf) s.push("ffuf");
+    if (o.enable_testssl) s.push("testssl"); if (o.enable_zap) s.push("zap"); if (profile !== "standard") s.push("nuclei");
+  }
+  if (o.enable_enrichment) s.push("enrichment");
+  return s;
+}
+pages.wizard = async () => {
+  const [p, st] = await Promise.all([api("/api/projects/" + ctx.pid), api("/api/settings")]);
+  const inc = p.scope.filter((e) => !e.excluded), exc = p.scope.filter((e) => e.excluded);
+  const L = st.limits;
+  app.append(h("h1", {}, "New scan"), h("p", { class: "muted" }, "Project: ", link("/projects/" + p.id, p.name)));
+  const profileRadios = Object.entries(PROFILE_INFO).map(([k, [name, desc]], i) => h("label", { class: "chk" }, h("input", { type: "radio", name: "profile", value: k, checked: i === 0, onchange: refresh }), h("span", {}, h("b", {}, name), h("div", { class: "hint" }, desc))));
+  const form = h("div", {},
+    h("h2", {}, "1. Scope"), h("div", { class: "panel" }, h("p", { class: "hint" }, "Only checked entries are tested. Exclusions below always apply."),
+      inc.map((e) => h("label", { class: "chk" }, h("input", { type: "checkbox", class: "scope-pick", value: e.id, checked: true }), h("span", { class: "mono" }, e.display))),
+      exc.length ? h("p", { class: "small muted" }, "Project exclusions: " + exc.map((e) => e.display).join(", ")) : null,
+      field("Extra exclusions for this scan (one per line)", h("textarea", { id: "w-excl", style: "min-height:60px" }))),
+    h("h2", {}, "2. Profile"), h("div", { class: "panel" }, profileRadios),
+    h("h2", {}, "3. Limits and modules"), h("div", { class: "panel" }, h("div", { class: "grid2" },
+      field("Requests per second", h("input", { id: "w-rps", type: "number", step: "0.5", min: "0.1", max: st.hard_max.requests_per_second, value: L.requests_per_second }), "Applied to httpx, Katana, Nuclei and FFUF."),
+      field("Maximum assets", h("input", { id: "w-assets", type: "number", min: "1", max: st.hard_max.max_assets, value: L.max_assets })),
+      field("Maximum duration (minutes)", h("input", { id: "w-mins", type: "number", min: "1", value: Math.round(L.max_scan_seconds / 60) })),
+      field("Ports", h("select", { id: "w-ports" }, h("option", { value: "top100" }, "Top 100"), h("option", { value: "top1000" }, "Top 1000"), h("option", { value: "custom" }, "Custom list")), "Port discovery uses a TCP connect scan."),
+      field("Custom ports", h("input", { id: "w-cports", placeholder: "80,443,8080-8090" })),
+      field("Crawl depth", h("input", { id: "w-depth", type: "number", min: "1", max: "5", value: 2 }))),
+      check("w-cache", "Reuse recent passive discovery results (subdomains, historical URLs, DNS), up to " + L.cache_ttl_hours + " h old. Scan evidence is never reused.", true),
+      check("w-resolved", "Allow port scanning IPs that in-scope hostnames resolve to, even if not listed in scope", false, "Leave this off for sites on hosting platforms (Vercel, Netlify, Cloudflare, GitHub Pages, cloud load balancers). The owner of the site can authorise testing the site, not scanning the platform's servers."),
+      h("h3", {}, "Optional modules"),
+      check("w-gau", "Historical URLs (gau). Queries public archives only.", false),
+      check("w-nmap", "Service detection (Nmap) on discovered open ports", false), check("w-testssl", "TLS assessment (testssl.sh)", false),
+      check("w-enrich", "Provider enrichment (Shodan, urlscan.io). Sends in-scope hostnames and IPs to the providers you enabled in Settings.", false),
+      check("w-ffuf", "Content discovery (FFUF, Web Assessment only)", false), field("FFUF wordlist path", h("input", { id: "w-wl", size: 50, placeholder: st.wordlist_dirs[0] ? st.wordlist_dirs[0] + "/common.txt" : "" }), "Must be inside: " + (st.wordlist_dirs.join(", ") || "no wordlist directory is configured")),
+      check("w-zap", "OWASP ZAP quick scan (Web Assessment only). Spiders and actively tests; this is intrusive and its request rate is not controlled by ReconForge.", false),
+      field("Nuclei tags (comma separated)", h("input", { id: "w-tags", value: "exposure,misconfig,takeover", size: 40 }), "An unfiltered Nuclei run is thousands of requests per URL. At 2 requests/second it will usually hit the tool timeout with nothing to show. This starting set is narrower; clear it to run everything and raise the per-tool timeout in Settings. List valid tags with: nuclei -tgl"),
+      field("Nuclei severities", h("div", {}, ["info", "low", "medium", "high", "critical"].map((s) => h("label", { class: "chk", style: "display:inline-flex;margin-right:14px" }, h("input", { type: "checkbox", class: "w-sev", value: s, checked: s !== "info" }), s))))),
+    h("h2", {}, "4. Stages that will run"), h("div", { class: "panel", id: "w-plan" }),
+    h("h2", {}, "5. Confirm"), h("div", { class: "panel" },
+      check("w-auth", "I confirm I have permission to test the selected scope and I will follow the program's rules.", false),
+      h("div", { id: "w-active-box" }, check("w-active", "I understand this profile sends active vulnerability checks to the target and I want to run them now.", false)),
+      h("div", { class: "bar" }, h("button", { class: "primary", onclick: attempt(submit) }, "Start scan"))));
+  app.append(form);
+  const profile = () => document.querySelector("input[name=profile]:checked").value;
+  const opts = () => ({ enable_gau: val("w-gau").checked, enable_nmap: val("w-nmap").checked, enable_testssl: val("w-testssl").checked, enable_ffuf: val("w-ffuf").checked, enable_zap: val("w-zap").checked, enable_enrichment: val("w-enrich").checked });
+  function refresh() {
+    const pr = profile(), o = opts();
+    val("w-active-box").style.display = pr === "vulnerability" || pr === "web" ? "" : "none";
+    clear(val("w-plan")).append(h("ol", {}, planStages(pr, o).map((s) => h("li", {}, STAGE_LABEL[s]))), h("p", { class: "hint" }, "Stages that need a missing tool are reported as 'Tool missing' and skipped. Check Tool health first."));
+  }
+  document.querySelectorAll("#app input[type=checkbox]").forEach((c) => c.addEventListener("change", refresh)); refresh();
+  async function submit() {
+    const pr = profile(); const ports = val("w-ports").value === "custom" ? val("w-cports").value.trim() : val("w-ports").value;
+    const body = { profile: pr, scope_entry_ids: [...document.querySelectorAll(".scope-pick:checked")].map((c) => Number(c.value)),
+      extra_exclusions: val("w-excl").value.split("\n").map((x) => x.trim()).filter(Boolean), authorization_confirmed: val("w-auth").checked,
+      active_testing_confirmed: val("w-active").checked && (pr === "vulnerability" || pr === "web"),
+      options: { ...opts(), requests_per_second: Number(val("w-rps").value), max_assets: Number(val("w-assets").value), max_scan_seconds: Number(val("w-mins").value) * 60, ports,
+        use_cache: val("w-cache").checked, allow_resolved_ips: val("w-resolved").checked, crawl_depth: Number(val("w-depth").value), ffuf_wordlist: val("w-wl").value.trim(),
+        nuclei_tags: val("w-tags").value.trim(), nuclei_severity: [...document.querySelectorAll(".w-sev:checked")].map((c) => c.value) } };
+    const r = await api("/api/projects/" + p.id + "/scans", "POST", body);
+    location.href = "/scans/" + r.id;
+  }
+};
+
+function renderCompare(box, c) {
+  clear(box);
+  box.append(h("h3", {}, "Scan #" + c.older_scan + " compared with #" + c.newer_scan), c.note ? h("div", { class: "notice" }, c.note) : null);
+  const list = (title, items, fmt) => h("div", {}, h("h3", {}, title + " (" + items.length + ")"), items.length ? h("ul", {}, items.slice(0, 200).map((i) => h("li", {}, fmt(i)))) : h("p", { class: "muted" }, "None"));
+  box.append(h("div", { class: "grid2" },
+    list("New assets", c.assets_new, (a) => a.kind + " " + a.value), list("Assets not seen again", c.assets_disappeared, (a) => a.kind + " " + a.value),
+    list("New findings", c.findings_new, (f) => f.severity + ": " + f.title + " on " + f.asset), list("Findings not detected again", c.findings_not_detected, (f) => f.severity + ": " + f.title + " on " + f.asset)),
+    h("p", { class: "muted small" }, c.assets_unchanged + " assets and " + c.findings_unchanged + " findings appear in both. 'Not seen again' only means a scan did not observe it; it does not prove it was removed or fixed."));
+}
+
+pages.scan = async () => {
+  const sid = ctx.sid;
+  const head = h("div", {}), ladder = h("div", {}), side = h("div", {}), logs = h("pre", { class: "log" }), cmp = h("div", {}), runsBox = h("div", {});
+  app.append(head, h("h2", {}, "Stages"), ladder, side, h("h2", {}, "Log"), logs, h("h2", {}, "Tool runs"), runsBox, cmp);
+  const act = (path, msg) => attempt(async () => { await api("/api/scans/" + sid + "/" + path, "POST"); if (msg) toast(msg); load(); });
+  async function load() {
+    const s = await api("/api/scans/" + sid);
+    const active = ["queued", "running", "paused"].includes(s.status);
+    clear(head).append(h("h1", {}, "Scan #" + s.id, " ", pill(s.status)),
+      h("p", { class: "muted" }, link("/projects/" + s.project_id, s.project), "   Profile: " + s.profile + "   Created " + fmtTime(s.created_at) + (s.completed_at ? "   Finished " + fmtTime(s.completed_at) : "")),
+      h("p", {}, h("b", {}, "Scope: "), s.scope.join(", "), s.exclusions.length ? h("span", {}, h("b", {}, "   Exclusions: "), s.exclusions.join(", ")) : null),
+      h("p", { class: "small muted" }, "Limits: " + s.limits.requests_per_second + " req/s, " + s.limits.max_concurrent_target_jobs + " target job(s) at a time, " + s.limits.max_assets + " assets, " + Math.round(s.limits.max_scan_seconds / 60) + " min, tool timeout " + Math.round(s.limits.tool_timeout_seconds / 60) + " min"),
+      s.error ? h("div", { class: "notice bad" }, s.error) : null,
+      h("div", { class: "bar" },
+        active && s.status !== "paused" ? h("button", { onclick: act("pause", "Will pause before the next stage") }, "Pause") : null,
+        s.status === "paused" ? h("button", { onclick: act("resume") }, "Resume") : null,
+        active ? h("button", { class: "danger", onclick: act("cancel") }, "Cancel") : null,
+        !active ? h("button", { onclick: act("retry", "Unfinished stages re-queued") }, "Retry unfinished stages") : null,
+        !active ? h("button", { onclick: attempt(async () => { renderCompare(cmp, await api("/api/scans/" + sid + "/compare")); cmp.scrollIntoView(); }) }, "Compare with previous scan") : null,
+        !active ? h("a", { class: "btn", href: "/scans/" + sid + "/report.html", target: "_blank", rel: "noopener" }, "Open HTML report") : null,
+        !active ? h("a", { class: "btn", href: "/api/scans/" + sid + "/report.json" }, "Download JSON") : null));
+    clear(ladder).append(h("ol", { class: "ladder" }, s.stages.map((g, i) => h("li", { class: g.status }, h("span", { class: "n" }, i + 1),
+      h("div", {}, h("b", {}, g.label), " ", h("span", { class: "muted small" }, g.tool + (g.touches_target ? ", contacts the target" : ", does not contact the target"))),
+      h("div", {}, pill(g.status), g.status === "completed" || g.status === "partial" || g.status === "cached" ? " " + g.items + " items" : ""),
+      h("div", { class: "msg" }, g.message || g.traffic_note, g.cached_from_scan ? "  (from scan #" + g.cached_from_scan + ", " + ago(g.cached_at) + ")" : "", g.attempts > 1 ? "  Attempts: " + g.attempts : "")))));
+    const sm = s.summary || {};
+    clear(side);
+    if (!active && sm.stage_status) {
+      const sevs = sm.findings_by_severity || {};
+      side.append(h("h2", {}, "Result"), h("div", { class: "tiles" }, [["Assets seen", sm.assets], ["New assets", sm.new_assets], ["Findings in this scan", Object.values(sevs).reduce((a, b) => a + b, 0)], ["New findings", sm.new_findings], ["Out-of-scope results rejected", sm.rejected_out_of_scope]]
+        .map(([k, v]) => h("div", { class: "tile" }, h("b", {}, v ?? 0), h("span", {}, k)))),
+        h("p", { class: "muted small" }, "Findings are scanner detections. They stay potential findings until an analyst validates them. ", link("/findings?scan=" + sid, "Review findings"), "  ", link("/assets", "Browse assets")));
+    }
+    logs.textContent = s.logs.map((l) => l.ts.slice(11, 19) + " " + l.level.toUpperCase().padEnd(7) + l.message).join("\n");
+    logs.scrollTop = logs.scrollHeight;
+    const runs = await api("/api/scans/" + sid + "/runs");
+    clear(runsBox).append(runs.length ? runs.map((r) => h("details", {}, h("summary", {}, r.stage_name + " " + r.version + " (" + r.status + ", exit " + (r.exit_code === null ? "none" : r.exit_code) + ", " + r.stdout_bytes + " bytes of output)"),
+      h("p", { class: "small muted" }, "Command (targets are passed on stdin where listed in the log):"), h("pre", { class: "ev" }, r.argv.join(" ")),
+      r.error ? h("p", { class: "small" }, "Error: " + r.error) : null,
+      r.stderr_tail ? h("div", {}, h("p", { class: "small muted" }, "Last error output:"), h("pre", { class: "ev" }, r.stderr_tail)) : null,
+      h("p", { class: "small muted" }, "First part of the tool's output:"), h("pre", { class: "ev" }, r.stdout_head || "(no output)"))) : h("p", { class: "muted" }, "No tool has been run yet."));
+    if (active) setTimeout(load, 2000);
+  }
+  await load();
+};
+
+pages.scans = async () => {
+  const sel = await projectSelect("", () => load());
+  const box = h("div", {}), cmp = h("div", {});
+  app.append(h("h1", {}, "Scan history"), h("div", { class: "bar" }, sel), box, cmp);
+  async function load() {
+    const rows = await api("/api/scans" + (sel.value ? "?project_id=" + sel.value : ""));
+    clear(box).append(rows.length ? table(["Scan", "Project", "Profile", "Status", "Created", "Assets", "New assets", "Findings", "New findings", ""], rows.map((s) => {
+      const sm = s.summary || {}, sevs = sm.findings_by_severity || {};
+      return h("tr", {}, h("td", {}, link("/scans/" + s.id, "#" + s.id)), h("td", {}, s.project), h("td", {}, s.profile), h("td", {}, pill(s.status)), h("td", {}, fmtTime(s.created_at)),
+        h("td", {}, sm.assets ?? ""), h("td", {}, sm.new_assets ?? ""), h("td", {}, sm.stage_status ? Object.values(sevs).reduce((a, b) => a + b, 0) : ""), h("td", {}, sm.new_findings ?? ""),
+        h("td", {}, ["completed", "completed_with_issues"].includes(s.status) ? h("button", { onclick: attempt(async () => renderCompare(cmp, await api("/api/scans/" + s.id + "/compare"))) }, "Compare with previous") : ""));
+    })) : empty("No scans have been run yet."));
+  }
+  await load();
+};
+
+pages.assets = async () => {
+  const state = { sort: "value", order: "asc" };
+  const sel = await projectSelect("", () => load());
+  const kind = h("select", { onchange: () => load() }, h("option", { value: "" }, "All types"), h("option", { value: "domain" }, "Domains"), h("option", { value: "ip" }, "IP addresses"));
+  const search = h("input", { placeholder: "Search assets", oninput: () => { clearTimeout(state.t); state.t = setTimeout(load, 250); } });
+  const box = h("div", {}), detail = h("div", {});
+  app.append(h("h1", {}, "Asset inventory"), h("div", { class: "bar" }, sel, kind, search), h("div", { class: "split" }, box, detail));
+  async function load() {
+    const qs = new URLSearchParams({ q: search.value, kind: kind.value, sort: state.sort, order: state.order }); if (sel.value) qs.set("project_id", sel.value);
+    const rows = await api("/api/assets?" + qs);
+    clear(box).append(rows.length ? table([{ label: "Asset", sort: "value" }, { label: "Type", sort: "kind" }, "IPs", { label: "Ports", sort: "ports" }, { label: "Open findings", sort: "findings" }, { label: "First seen", sort: "first_seen" }, { label: "Last seen", sort: "last_seen" }],
+      rows.map((a) => h("tr", { class: "row", onclick: attempt(() => show(a.id)) }, h("td", { class: "mono" }, a.value), h("td", {}, a.kind), h("td", { class: "mono" }, a.ips || ""), h("td", {}, a.ports), h("td", {}, a.findings), h("td", {}, ago(a.first_seen)), h("td", {}, ago(a.last_seen)))),
+      { onsort: (k) => { state.order = state.sort === k && state.order === "asc" ? "desc" : "asc"; state.sort = k; load(); } })
+      : empty("No assets match. Assets appear after a scan discovers them or from the exact domains and IPs in a scan's scope."));
+  }
+  async function show(id) {
+    const a = await api("/api/assets/" + id);
+    clear(detail).append(h("div", { class: "panel" }, h("h3", { class: "mono" }, a.value), h("p", { class: "muted small" }, "First seen " + fmtTime(a.first_seen) + ". Last seen " + fmtTime(a.last_seen) + " (scan #" + a.last_scan_id + "). Sources: " + a.sources),
+      h("h3", {}, "DNS"), a.dns.length ? h("ul", {}, a.dns.map((d) => h("li", { class: "mono" }, d.rtype + " " + d.value))) : h("p", { class: "muted" }, "No DNS records recorded."),
+      h("h3", {}, "Open ports"), a.ports.length ? h("ul", {}, a.ports.map((p) => h("li", { class: "mono" }, p.port + "/" + p.protocol + (p.ip ? " on " + p.ip : "") + " " + [p.service, p.product, p.version].filter(Boolean).join(" ") + " (" + p.source + ")"))) : h("p", { class: "muted" }, "None recorded."),
+      h("h3", {}, "HTTP endpoints"), a.endpoints.length ? h("ul", {}, a.endpoints.slice(0, 40).map((e) => h("li", {}, h("span", { class: "mono" }, e.url), " " + (e.status_code || "") + " " + (e.title || "")))) : h("p", { class: "muted" }, "None recorded."),
+      h("h3", {}, "Findings"), a.findings.length ? h("ul", {}, a.findings.map((f) => h("li", {}, sev(f.severity), " ", link("/findings?open=" + f.id, f.title), " (" + (VALID[f.validation_status] || f.validation_status) + ")"))) : h("p", { class: "muted" }, "None recorded."),
+      a.intel.length ? h("div", {}, h("h3", {}, "Third-party intelligence"), h("p", { class: "hint" }, "Reported by the provider. Not verified by ReconForge."), a.intel.map((i) => h("details", {}, h("summary", {}, i.provider + " for " + i.subject + " (" + ago(i.fetched_at) + ")"), h("pre", { class: "ev" }, JSON.stringify(i.payload, null, 2))))) : null));
+  }
+  await load();
+};
+
+pages.findings = async () => {
+  const params = new URLSearchParams(location.search);
+  const sel = await projectSelect("", () => load());
+  const sevSel = h("select", { onchange: () => load() }, h("option", { value: "" }, "All severities"), ["critical", "high", "medium", "low", "info"].map((s) => h("option", { value: s }, s)));
+  const stSel = h("select", { onchange: () => load() }, h("option", { value: "" }, "Any status"), Object.entries(VALID).map(([k, v]) => h("option", { value: k }, v)));
+  const search = h("input", { placeholder: "Search title, asset, template", oninput: () => { clearTimeout(search.t); search.t = setTimeout(load, 250); } });
+  const box = h("div", {}), detail = h("div", {});
+  app.append(h("h1", {}, "Findings"), h("p", { class: "muted" }, "These are scanner detections. A finding is only a potential finding until you validate it."), h("div", { class: "bar" }, sel, sevSel, stSel, search), h("div", { class: "split" }, box, detail));
+  async function load() {
+    const qs = new URLSearchParams({ severity: sevSel.value, status: stSel.value, text: search.value }); if (sel.value) qs.set("project_id", sel.value); if (params.get("scan")) qs.set("scan_id", params.get("scan"));
+    const rows = await api("/api/findings?" + qs);
+    clear(box).append(rows.length ? table(["Severity", "Title", "Asset", "Status", "Source", "Last seen"], rows.map((f) => h("tr", { class: "row", onclick: attempt(() => show(f.id)) },
+      h("td", {}, sev(f.severity)), h("td", {}, f.title), h("td", { class: "mono" }, f.asset), h("td", {}, VALID[f.validation_status] || f.validation_status), h("td", {}, f.source), h("td", {}, ago(f.last_seen)))))
+      : empty("No findings match. If no scan has run, there is nothing to show; if scans ran, nothing was detected with the enabled checks."));
+  }
+  async function show(id) {
+    const f = await api("/api/findings/" + id);
+    const st = h("select", { id: "f-status" }, Object.entries(VALID).map(([k, v]) => h("option", { value: k, selected: k === f.validation_status }, v)));
+    clear(detail).append(h("div", { class: "panel" }, h("h3", {}, sev(f.severity), " ", f.title),
+      h("p", { class: "muted small" }, f.potential ? "Potential finding. A scanner reported this and nobody has validated it." : (VALID[f.validation_status] || f.validation_status)),
+      h("p", {}, h("b", {}, "Asset: "), h("span", { class: "mono" }, f.asset), f.url ? h("span", {}, h("br"), h("b", {}, "URL: "), h("span", { class: "mono" }, f.url)) : null),
+      h("p", { class: "small" }, "Source " + f.source + " / " + f.template_id + ". Scanner confidence: " + f.confidence + ". Tool " + (f.tool_version || "unknown") + (f.template_version ? ", templates " + f.template_version : "") + ". First seen " + fmtTime(f.first_seen) + ", last seen " + fmtTime(f.last_seen) + ". Detected in scans: " + f.scans.map((x) => "#" + x).join(", ")),
+      f.description ? h("p", {}, f.description) : null,
+      h("h3", {}, "Evidence"), h("pre", { class: "ev" }, f.evidence || "(none recorded)"), f.details ? h("details", {}, h("summary", {}, "Request and response"), h("pre", { class: "ev" }, f.details)) : null,
+      f.refs.length ? h("div", {}, h("h3", {}, "References"), f.refs.map((r) => h("div", { class: "mono small" }, r))) : null,
+      h("h3", {}, "Analyst validation"), field("Status", st), field("Notes", h("textarea", { id: "f-notes" }, f.analyst_notes || "")),
+      h("div", { class: "bar" }, h("button", { class: "primary", onclick: attempt(async () => { await api("/api/findings/" + id, "PATCH", { validation_status: val("f-status").value, analyst_notes: val("f-notes").value }); toast("Saved"); load(); show(id); }) }, "Save"))));
+  }
+  await load();
+  if (params.get("open")) show(params.get("open")).catch(() => {});
+};
+
+pages.tools = async () => {
+  const box = h("div", {});
+  app.append(h("h1", {}, "Tool health"), h("p", { class: "muted" }, "ReconForge never installs or downloads tools. Each binary is looked up on PATH (outside the virtualenv), identified and version-checked."),
+    h("div", { class: "bar" }, h("button", { onclick: attempt(() => load(true)) }, "Re-check")), box);
+  async function load(refresh) {
+    clear(box).append(h("p", { class: "muted" }, "Checking"));
+    const tools = await api("/api/tools" + (refresh ? "?refresh=1" : ""));
+    const grp = (title, list) => h("div", {}, h("h2", {}, title), table(["Tool", "Status", "Version", "Path", "Contacts target", "Kali package (check with apt-cache policy) / upstream"], list.map((t) => h("tr", {},
+      h("td", {}, h("b", {}, t.label), h("div", { class: "small muted" }, t.description)),
+      h("td", {}, h("span", { class: "pill " + (t.installed ? "s-ok" : "s-bad") }, t.installed ? "Installed" : "Missing"), t.problem ? h("div", { class: "small muted" }, t.problem) : null),
+      h("td", { class: "mono" }, t.version || ""), h("td", { class: "mono small" }, t.path || ""), h("td", {}, t.touches_target ? "Yes" : "No"),
+      h("td", {}, h("code", {}, t.kali_package), " ", h("a", { href: t.install_url, target: "_blank", rel: "noopener noreferrer" }, "official page"), t.template_version ? h("div", { class: "small muted" }, "templates " + t.template_version) : null)))));
+    clear(box).append(grp("Core pipeline", tools.filter((t) => t.core)), grp("Optional modules", tools.filter((t) => !t.core)));
+  }
+  await load(false);
+};
+
+pages.settings = async () => {
+  const s = await api("/api/settings");
+  const L = s.limits, H = s.hard_max;
+  const defs = [["requests_per_second", "Requests per second (HTTP tools)"], ["per_host_rps", "Per-host requests per second"], ["max_concurrent_jobs", "Concurrent scans (restart required)"], ["max_concurrent_target_jobs", "Concurrent target-contacting tools (restart required)"],
+    ["dns_qps", "DNS queries per second"], ["port_scan_pps", "Port scan packets per second"], ["max_assets", "Maximum assets per scan"], ["max_scan_seconds", "Maximum scan duration (seconds)"],
+    ["tool_timeout_seconds", "Per-tool timeout (seconds)"], ["max_output_bytes", "Maximum output per tool (bytes)"], ["cache_ttl_hours", "Discovery cache lifetime (hours)"], ["max_retries", "Retries for transient failures"], ["retry_base_seconds", "Retry base delay (seconds)"]];
+  app.append(h("h1", {}, "Settings"), h("h2", {}, "Execution limits"), h("div", { class: "panel" },
+    h("p", { class: "hint" }, "Defaults are deliberately conservative. Set them lower if the program's rules require it. Values above the built-in maximum are clamped by the server. The server listens on " + s.bind + "."),
+    h("div", { class: "grid2" }, defs.map(([k, label]) => field(label, h("input", { id: "l-" + k, type: "number", step: "any", value: L[k] }), "Maximum " + H[k]))),
+    h("div", { class: "bar" }, h("button", { class: "primary", onclick: attempt(async () => {
+      const limits = {}; defs.forEach(([k]) => { limits[k] = Number(val("l-" + k).value); });
+      const r = await api("/api/settings/limits", "PUT", { limits }); toast(r.note);
+    }) }, "Save limits"))));
+  app.append(h("h2", {}, "Optional intelligence providers"), h("p", { class: "muted" }, "Off by default. The scan pipeline works without any of them. Keys are stored on this machine only and are never shown again. Enabling a provider lets scans that opt in send in-scope hostnames or IPs to it."));
+  s.integrations.forEach((i) => {
+    app.append(h("div", { class: "panel" }, h("h3", {}, i.label), h("p", { class: "small muted" }, "Sends: " + i.sends + ". ", h("a", { href: i.docs, target: "_blank", rel: "noopener noreferrer" }, "API documentation")),
+      h("p", {}, "Credential: ", h("b", {}, i.configured ? "configured" : "not configured"), "   Integration: ", h("b", {}, i.enabled ? "enabled" : "disabled")),
+      h("p", { class: "small" }, "Last successful lookup: " + (i.last_success ? fmtTime(i.last_success) : "never") + (i.last_error ? "   Last error: " + i.last_error : "") + (i.backoff_until ? "   Backing off until " + fmtTime(i.backoff_until) : "")),
+      Object.keys(i.usage).length ? h("p", { class: "small mono" }, "Provider-reported usage: " + JSON.stringify(i.usage)) : null,
+      h("div", { class: "bar" }, h("input", { type: "password", id: "k-" + i.name, placeholder: i.configured ? "Enter a new key to replace the stored one" : "API key", autocomplete: "off", size: 36 }),
+        h("button", { onclick: attempt(async () => { const k = val("k-" + i.name).value; if (!k.trim()) throw new Error("Enter a key first."); await api("/api/integrations/" + i.name, "PUT", { api_key: k }); toast("Key stored locally"); location.reload(); }) }, "Save key"),
+        i.configured ? h("button", { onclick: attempt(async () => { await api("/api/integrations/" + i.name, "PUT", { api_key: "" }); location.reload(); }) }, "Remove key") : null,
+        h("button", { onclick: attempt(async () => { await api("/api/integrations/" + i.name, "PUT", { enabled: !i.enabled }); location.reload(); }) }, i.enabled ? "Disable" : "Enable"),
+        i.configured ? h("button", { onclick: attempt(async () => { const r = await api("/api/integrations/" + i.name + "/test", "POST"); toast(r.ok ? "Credential works" : r.error, !r.ok); setTimeout(() => location.reload(), 1200); }) }, "Test") : null)));
+  });
+  app.append(h("h2", {}, "Wordlists"), h("p", { class: "small" }, "FFUF wordlists must live under: " + (s.wordlist_dirs.join(", ") || "no directory configured (set RECONFORGE_WORDLIST_DIRS)")));
+};
+
+(async () => {
+  document.querySelectorAll(".rail a[data-nav]").forEach((a) => { if (a.dataset.nav.split(" ").includes(ctx.page)) a.classList.add("on"); });
+  try { clear(app); await pages[ctx.page](); } catch (e) { clear(app).append(h("div", { class: "notice bad" }, "Could not load this page: " + e.message)); }
+})();
+
+=== FILE: app/templates/report.html ===
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ReconForge report: {{ r.project.name }}, scan #{{ r.scan.id }}</title>
+<style>
+:root{--bg:#e9eef1;--panel:#f8fafb;--ink:#16232c;--muted:#52636f;--line:#cbd5db;--accent:#0b6e85;--critical:#a3122a;--high:#c2410c;--medium:#a16207;--low:#2f6f9f;--info:#5b6b77}
+@media (prefers-color-scheme:dark){:root{--bg:#0f171d;--panel:#16222a;--ink:#e3eaee;--muted:#9aabb6;--line:#2a3a45;--accent:#4fb4cf;--critical:#ff6b81;--high:#ff9a5c;--medium:#e9b949;--low:#69a9d8;--info:#9aabb6}}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 ui-sans-serif,"Segoe UI","Noto Sans","DejaVu Sans",sans-serif}
+main{max-width:1100px;margin:0 auto;padding:28px 20px 60px}
+h1{font-size:26px;margin:0 0 4px}h2{font-size:18px;margin:34px 0 10px;border-bottom:1px solid var(--line);padding-bottom:6px}
+.muted{color:var(--muted)}table{border-collapse:collapse;width:100%;background:var(--panel);font-size:14px}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-weight:600}
+code,pre{font-family:ui-monospace,"DejaVu Sans Mono",Menlo,monospace;font-size:13px}pre{white-space:pre-wrap;word-break:break-word;background:var(--panel);border:1px solid var(--line);padding:10px;margin:6px 0}
+.box{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--accent);padding:12px 14px}
+.sev{font-weight:700}.sev-critical{color:var(--critical)}.sev-high{color:var(--high)}.sev-medium{color:var(--medium)}.sev-low{color:var(--low)}.sev-info{color:var(--info)}
+.wrap{overflow-x:auto}details{margin:6px 0}
+</style></head><body><main>
+<h1>{{ r.project.name }}: scan #{{ r.scan.id }}</h1>
+<p class="muted">Profile {{ r.scan.profile }}. Status {{ r.scan.status|replace('_',' ') }}. Report generated {{ r.generated_at }}.</p>
+<div class="box"><strong>How to read this report.</strong> {{ r.statement }}</div>
+
+<h2>Scope and limits</h2>
+<p><strong>Authorised scope:</strong> {% for s in r.scope.include %}<code>{{ s }}</code> {% else %}<span class="muted">none recorded</span>{% endfor %}</p>
+<p><strong>Exclusions:</strong> {% for s in r.scope.exclude %}<code>{{ s }}</code> {% else %}<span class="muted">none</span>{% endfor %}</p>
+<p>Started {{ r.scan.started_at or 'not started' }}. Completed {{ r.scan.completed_at or 'not completed' }}.
+Permission confirmed: {{ 'yes' if r.scan.authorization_confirmed else 'no' }}. Active testing confirmed: {{ 'yes' if r.scan.active_testing_confirmed else 'no' }}.</p>
+<div class="wrap"><table><tr><th>Limit</th><th>Value</th></tr>{% for k, v in r.limits.items() %}<tr><td>{{ k }}</td><td>{{ v }}</td></tr>{% endfor %}</table></div>
+
+<h2>Tools used</h2>
+{% if r.tools %}<div class="wrap"><table><tr><th>Tool</th><th>Version</th></tr>{% for t in r.tools %}<tr><td>{{ t.tool }}</td><td>{{ t.version or 'unknown' }}</td></tr>{% endfor %}</table></div>
+{% else %}<p class="muted">No tool was executed in this scan.</p>{% endif %}
+
+<h2>Stages</h2>
+<div class="wrap"><table><tr><th>Stage</th><th>Status</th><th>Items</th><th>Traffic</th><th>Message</th></tr>
+{% for s in r.stages %}<tr><td>{{ s.label }} <span class="muted">({{ s.tool }})</span></td><td>{{ s.status|replace('_',' ') }}</td><td>{{ s['items'] }}</td>
+<td class="muted">{{ s.traffic_note }}</td><td>{{ s.message or '' }}{% if s.cached_from_scan %} Cached from scan #{{ s.cached_from_scan }} ({{ s.cached_at }}).{% endif %}</td></tr>{% endfor %}</table></div>
+{% if r.failed_or_incomplete_stages %}<h2>Failed or incomplete stages</h2>
+<div class="box">{% for s in r.failed_or_incomplete_stages %}<p><strong>{{ s.label }}</strong>: {{ s.status|replace('_',' ') }}. {{ s.message }}</p>{% endfor %}</div>{% endif %}
+
+<h2>Findings ({{ r.findings|length }})</h2>
+<p class="muted">{% for s in sev_order %}{% if r.findings_by_severity.get(s) %}{{ s }}: {{ r.findings_by_severity[s] }}&nbsp; {% endif %}{% endfor %}</p>
+{% for f in r.findings %}<details><summary><span class="sev sev-{{ f.severity }}">{{ f.severity }}</span> {{ f.title }}, <code>{{ f.asset }}</code> <span class="muted">({{ f.label }})</span></summary>
+<p>{{ f.description }}</p>
+<p><strong>URL:</strong> <code>{{ f.url or 'n/a' }}</code>. <strong>Source:</strong> {{ f.source }} / <code>{{ f.template_id }}</code>. <strong>Confidence:</strong> {{ f.confidence }}.
+<strong>Tool:</strong> {{ f.tool_version or 'unknown' }}{% if f.template_version %}, templates {{ f.template_version }}{% endif %}. <strong>First seen:</strong> {{ f.first_seen }}.</p>
+<pre>{{ f.evidence }}</pre>{% if f.details %}<pre>{{ f.details }}</pre>{% endif %}
+{% if f.analyst_notes %}<p><strong>Analyst notes:</strong> {{ f.analyst_notes }}</p>{% endif %}
+{% for ref in f.refs %}<div><code>{{ ref }}</code></div>{% endfor %}</details>
+{% else %}<p class="muted">No findings were recorded in this scan.</p>{% endfor %}
+
+<h2>Assets ({{ r.assets|length }})</h2>
+{% if r.assets %}<div class="wrap"><table><tr><th>Kind</th><th>Asset</th><th>Seen via</th><th>First seen</th><th>New</th></tr>
+{% for a in r.assets %}<tr><td>{{ a.kind }}</td><td><code>{{ a.value }}</code></td><td>{{ a.seen_via }}</td><td>{{ a.first_seen }}</td><td>{{ 'yes' if a.new_in_this_scan else '' }}</td></tr>{% endfor %}</table></div>
+{% else %}<p class="muted">No assets recorded.</p>{% endif %}
+
+<h2>Services ({{ r.ports|length }})</h2>
+{% if r.ports %}<div class="wrap"><table><tr><th>Host</th><th>IP</th><th>Port</th><th>Service</th><th>Version</th><th>Source</th></tr>
+{% for p in r.ports %}<tr><td><code>{{ p.host }}</code></td><td>{{ p.ip or '' }}</td><td>{{ p.port }}/{{ p.protocol }}</td><td>{{ p.service or '' }}</td><td>{{ ((p.product or '') ~ ' ' ~ (p.version or ''))|trim }}</td><td>{{ p.source }}</td></tr>{% endfor %}</table></div>
+{% else %}<p class="muted">No open ports recorded.</p>{% endif %}
+
+<h2>HTTP endpoints ({{ r.endpoints|length }})</h2>
+{% if r.endpoints %}<div class="wrap"><table><tr><th>URL</th><th>Status</th><th>Title</th><th>Technology</th><th>Source</th></tr>
+{% for e in r.endpoints[:500] %}<tr><td><code>{{ e.url }}</code></td><td>{{ e.status_code or '' }}</td><td>{{ e.title or '' }}</td><td>{{ (e.technologies or [])|join(', ') }}</td><td>{{ e.source }}</td></tr>{% endfor %}</table></div>
+{% if r.endpoints|length > 500 %}<p class="muted">First 500 shown. The JSON export contains all of them.</p>{% endif %}
+{% else %}<p class="muted">No HTTP endpoints recorded.</p>{% endif %}
+</main></body></html>
+

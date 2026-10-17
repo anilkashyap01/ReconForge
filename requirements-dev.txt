@@ -1,0 +1,3 @@
+-r requirements.txt
+pytest>=8.0
+httpx>=0.27   # only needed by FastAPI's TestClient; see README note about the `httpx` command name

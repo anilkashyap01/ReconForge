@@ -1,0 +1,484 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ReconForge report: {{ r.project.name }}, scan #{{ r.scan.id }}</title>
+<style>
+:root {
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, "Noto Sans", "DejaVu Sans", sans-serif;
+  --mono: "JetBrains Mono", "Fira Code", ui-monospace, "SFMono-Regular", "DejaVu Sans Mono", Menlo, Consolas, monospace;
+
+  --bg: #f4f6f9;
+  --panel: #ffffff;
+  --panel2: #edf1f6;
+  --ink: #0f172a;
+  --muted: #5b687b;
+  --line: #d5dde7;
+  --accent: #4f46e5;
+
+  --critical: #be123c;
+  --critical-bg: #fff1f2;
+  --critical-border: #fda4af;
+
+  --high: #c2410c;
+  --high-bg: #fff7ed;
+  --high-border: #fdba74;
+
+  --medium: #92400e;
+  --medium-bg: #fffbeb;
+  --medium-border: #fcd34d;
+
+  --low: #1d4ed8;
+  --low-bg: #eff6ff;
+  --low-border: #93c5fd;
+
+  --info: #475569;
+  --info-bg: #f1f5f9;
+  --info-border: #cbd5e1;
+
+  --ok: #15803d;
+  --ok-bg: #f0fdf4;
+  --ok-border: #86efac;
+
+  --warn: #92400e;
+  --warn-bg: #fffbeb;
+  --warn-border: #fcd34d;
+
+  --bad: #be123c;
+  --bad-bg: #fff1f2;
+  --bad-border: #fda4af;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b0e14;
+    --panel: #11161f;
+    --panel2: #171e2b;
+    --ink: #ecf1f8;
+    --muted: #8b98ad;
+    --line: #232c3d;
+    --accent: #6366f1;
+
+    --critical: #ff7a90;
+    --critical-bg: rgba(244, 63, 94, 0.15);
+    --critical-border: rgba(244, 63, 94, 0.45);
+
+    --high: #ff9e64;
+    --high-bg: rgba(249, 115, 22, 0.15);
+    --high-border: rgba(249, 115, 22, 0.45);
+
+    --medium: #f5c451;
+    --medium-bg: rgba(234, 179, 8, 0.15);
+    --medium-border: rgba(234, 179, 8, 0.45);
+
+    --low: #6cb6ff;
+    --low-bg: rgba(59, 130, 246, 0.15);
+    --low-border: rgba(59, 130, 246, 0.45);
+
+    --info: #94a3b8;
+    --info-bg: rgba(148, 163, 184, 0.12);
+    --info-border: rgba(148, 163, 184, 0.32);
+
+    --ok: #4ade80;
+    --ok-bg: rgba(34, 197, 94, 0.14);
+    --ok-border: rgba(34, 197, 94, 0.42);
+
+    --warn: #f5c451;
+    --warn-bg: rgba(234, 179, 8, 0.15);
+    --warn-border: rgba(234, 179, 8, 0.45);
+
+    --bad: #ff7a90;
+    --bad-bg: rgba(244, 63, 94, 0.15);
+    --bad-border: rgba(244, 63, 94, 0.45);
+  }
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.55 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+main {
+  max-width: 1140px;
+  margin: 0 auto;
+  padding: 32px 24px 64px;
+}
+
+header.report-head {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 16px;
+  margin-bottom: 20px;
+}
+
+h1 {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin: 0 0 6px;
+}
+
+h2 {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 32px 0 12px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 6px;
+}
+
+p {
+  margin: 8px 0;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  margin: 16px 0 24px;
+}
+
+.tile {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+
+.tile b {
+  display: block;
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+
+.tile span {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.box {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin: 12px 0;
+}
+
+.box.warn {
+  border-left-color: var(--warn);
+  background: var(--warn-bg);
+  border-color: var(--warn-border);
+}
+
+.wrap {
+  overflow-x: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin: 10px 0;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  background: var(--panel);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+th, td {
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+tr:last-child td {
+  border-bottom: 0;
+}
+
+th {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: var(--panel2);
+  white-space: nowrap;
+}
+
+code, pre {
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+code {
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin: 8px 0;
+}
+
+.sev {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border: 1px solid transparent;
+}
+
+.sev-critical { color: var(--critical); background: var(--critical-bg); border-color: var(--critical-border); }
+.sev-high     { color: var(--high);     background: var(--high-bg);     border-color: var(--high-border); }
+.sev-medium   { color: var(--medium);   background: var(--medium-bg);   border-color: var(--medium-border); }
+.sev-low      { color: var(--low);      background: var(--low-bg);      border-color: var(--low-border); }
+.sev-info     { color: var(--info);     background: var(--info-bg);     border-color: var(--info-border); }
+
+.pill {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid var(--line);
+  background: var(--panel2);
+}
+
+.pill.s-completed { color: var(--ok); background: var(--ok-bg); border-color: var(--ok-border); }
+.pill.s-partial   { color: var(--warn); background: var(--warn-bg); border-color: var(--warn-border); }
+.pill.s-failed,
+.pill.s-missing_tool { color: var(--bad); background: var(--bad-bg); border-color: var(--bad-border); }
+
+.sev-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0 14px;
+}
+
+details {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 8px 0;
+}
+
+details summary {
+  cursor: pointer;
+  font-weight: 600;
+  padding: 2px 0;
+}
+
+.refs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+@media print {
+  :root {
+    --bg: #ffffff;
+    --panel: #ffffff;
+    --panel2: #f3f4f6;
+    --ink: #000000;
+    --muted: #4b5563;
+    --line: #d1d5db;
+  }
+
+  body {
+    background: #ffffff;
+    color: #000000;
+    font-size: 11pt;
+  }
+
+  main {
+    max-width: 100%;
+    padding: 0;
+  }
+
+  .wrap, .tile, .box, details {
+    break-inside: avoid;
+    box-shadow: none;
+  }
+
+  h2 {
+    break-after: avoid;
+  }
+}
+</style>
+</head>
+<body>
+<main>
+  <header class="report-head">
+    <h1>{{ r.project.name }}: scan #{{ r.scan.id }}</h1>
+    <p class="muted">Profile: <strong>{{ r.scan.profile }}</strong> &middot; Status: <span class="pill s-{{ r.scan.status }}">{{ r.scan.status|replace('_',' ') }}</span> &middot; Report generated {{ r.generated_at }}.</p>
+  </header>
+
+  <div class="box"><strong>How to read this report.</strong> {{ r.statement }}</div>
+
+  <section class="tiles" aria-label="Scan summary metrics">
+    <div class="tile"><b>{{ r.findings|length }}</b><span>Findings recorded</span></div>
+    <div class="tile"><b>{{ r.assets|length }}</b><span>Assets in report</span></div>
+    <div class="tile"><b>{{ r.ports|length }}</b><span>Open ports</span></div>
+    <div class="tile"><b>{{ r.endpoints|length }}</b><span>HTTP endpoints</span></div>
+    <div class="tile"><b>{{ r.stages|length }}</b><span>Pipeline stages</span></div>
+  </section>
+
+  <h2>Scope and limits</h2>
+  <p><strong>Authorised scope:</strong> {% for s in r.scope.include %}<code>{{ s }}</code> {% else %}<span class="muted">none recorded</span>{% endfor %}</p>
+  <p><strong>Exclusions:</strong> {% for s in r.scope.exclude %}<code>{{ s }}</code> {% else %}<span class="muted">none</span>{% endfor %}</p>
+  <p>Started {{ r.scan.started_at or 'not started' }}. Completed {{ r.scan.completed_at or 'not completed' }}.
+  Permission confirmed: {{ 'yes' if r.scan.authorization_confirmed else 'no' }}. Active testing confirmed: {{ 'yes' if r.scan.active_testing_confirmed else 'no' }}.</p>
+  <div class="wrap">
+    <table>
+      <thead><tr><th>Limit</th><th>Value</th></tr></thead>
+      <tbody>{% for k, v in r.limits.items() %}<tr><td><code>{{ k }}</code></td><td>{{ v }}</td></tr>{% endfor %}</tbody>
+    </table>
+  </div>
+
+  <h2>Tools used</h2>
+  {% if r.tools %}
+  <div class="wrap">
+    <table>
+      <thead><tr><th>Tool</th><th>Version</th></tr></thead>
+      <tbody>{% for t in r.tools %}<tr><td><strong>{{ t.tool }}</strong></td><td><code>{{ t.version or 'unknown' }}</code></td></tr>{% endfor %}</tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="muted">No tool was executed in this scan.</p>
+  {% endif %}
+
+  <h2>Stages</h2>
+  <div class="wrap">
+    <table>
+      <thead><tr><th>Stage</th><th>Status</th><th>Items</th><th>Traffic</th><th>Message</th></tr></thead>
+      <tbody>
+      {% for s in r.stages %}
+        <tr>
+          <td><strong>{{ s.label }}</strong> <span class="muted">(<code>{{ s.tool }}</code>)</span></td>
+          <td><span class="pill s-{{ s.status }}">{{ s.status|replace('_',' ') }}</span></td>
+          <td>{{ s['items'] }}</td>
+          <td class="muted">{{ s.traffic_note }}</td>
+          <td>{{ s.message or '' }}{% if s.cached_from_scan %} Cached from scan #{{ s.cached_from_scan }} ({{ s.cached_at }}).{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  {% if r.failed_or_incomplete_stages %}
+  <h2>Failed or incomplete stages</h2>
+  <div class="box warn">
+    {% for s in r.failed_or_incomplete_stages %}
+      <p><strong>{{ s.label }}</strong>: {{ s.status|replace('_',' ') }}. {{ s.message }}</p>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <h2>Findings ({{ r.findings|length }})</h2>
+  <div class="sev-summary">
+    {% for s in sev_order %}
+      {% if r.findings_by_severity.get(s) %}
+        <span><span class="sev sev-{{ s }}">{{ s }}</span> <strong>{{ r.findings_by_severity[s] }}</strong></span>
+      {% endif %}
+    {% endfor %}
+  </div>
+  {% for f in r.findings %}
+  <details open>
+    <summary><span class="sev sev-{{ f.severity }}">{{ f.severity }}</span> {{ f.title }}, <code>{{ f.asset }}</code> <span class="muted">({{ f.label }})</span></summary>
+    <p>{{ f.description }}</p>
+    <p><strong>URL:</strong> <code>{{ f.url or 'n/a' }}</code>. <strong>Source:</strong> {{ f.source }} / <code>{{ f.template_id }}</code>. <strong>Confidence:</strong> {{ f.confidence }}.
+    <strong>Tool:</strong> {{ f.tool_version or 'unknown' }}{% if f.template_version %}, templates {{ f.template_version }}{% endif %}. <strong>First seen:</strong> {{ f.first_seen }}.</p>
+    <pre>{{ f.evidence }}</pre>
+    {% if f.details %}<pre>{{ f.details }}</pre>{% endif %}
+    {% if f.analyst_notes %}<p><strong>Analyst notes:</strong> {{ f.analyst_notes }}</p>{% endif %}
+    {% if f.refs %}
+    <div class="refs-list">
+      {% for ref in f.refs %}<div><code>{{ ref }}</code></div>{% endfor %}
+    </div>
+    {% endif %}
+  </details>
+  {% else %}
+  <p class="muted">No findings were recorded in this scan.</p>
+  {% endfor %}
+
+  <h2>Assets ({{ r.assets|length }})</h2>
+  {% if r.assets %}
+  <div class="wrap">
+    <table>
+      <thead><tr><th>Kind</th><th>Asset</th><th>Seen via</th><th>First seen</th><th>New</th></tr></thead>
+      <tbody>
+      {% for a in r.assets %}
+        <tr><td><code>{{ a.kind }}</code></td><td><code>{{ a.value }}</code></td><td>{{ a.seen_via }}</td><td>{{ a.first_seen }}</td><td>{{ 'yes' if a.new_in_this_scan else '' }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="muted">No assets recorded.</p>
+  {% endif %}
+
+  <h2>Services ({{ r.ports|length }})</h2>
+  {% if r.ports %}
+  <div class="wrap">
+    <table>
+      <thead><tr><th>Host</th><th>IP</th><th>Port</th><th>Service</th><th>Version</th><th>Source</th></tr></thead>
+      <tbody>
+      {% for p in r.ports %}
+        <tr><td><code>{{ p.host }}</code></td><td><code>{{ p.ip or '' }}</code></td><td><code>{{ p.port }}/{{ p.protocol }}</code></td><td>{{ p.service or '' }}</td><td>{{ ((p.product or '') ~ ' ' ~ (p.version or ''))|trim }}</td><td>{{ p.source }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="muted">No open ports recorded.</p>
+  {% endif %}
+
+  <h2>HTTP endpoints ({{ r.endpoints|length }})</h2>
+  {% if r.endpoints %}
+  <div class="wrap">
+    <table>
+      <thead><tr><th>URL</th><th>Status</th><th>Title</th><th>Technology</th><th>Source</th></tr></thead>
+      <tbody>
+      {% for e in r.endpoints[:500] %}
+        <tr><td><code>{{ e.url }}</code></td><td>{{ e.status_code or '' }}</td><td>{{ e.title or '' }}</td><td>{{ (e.technologies or [])|join(', ') }}</td><td>{{ e.source }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if r.endpoints|length > 500 %}<p class="muted">First 500 shown. The JSON export contains all of them.</p>{% endif %}
+  {% else %}
+  <p class="muted">No HTTP endpoints recorded.</p>
+  {% endif %}
+</main>
+</body>
+</html>
