@@ -4,126 +4,98 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ title }} - ReconForge</title>
-<link rel="stylesheet" href="/static/style.css?v=6.0">
+<link rel="stylesheet" href="/static/style.css?v=7.0">
 </head>
 <body data-page="{{ page }}" data-pid="{{ pid if pid is not none else '' }}" data-sid="{{ sid if sid is not none else '' }}">
-<div class="app-shell">
-  <nav class="rail" id="sidebar" aria-label="Main">
-    <div class="rail-head">
-      <a class="brand" href="/">
-        <svg class="brand-mark" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 2L3 6.5v5.5c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V6.5L12 2z"/>
-          <circle cx="12" cy="12" r="3"/>
-        </svg>
-        <span class="brand-text">ReconForge</span>
-      </a>
-    </div>
+<div class="app-shell single-page">
+  <header class="topbar-header" id="top-header" role="banner">
+    <div class="header-container">
+      <div class="header-left">
+        <a class="brand" href="/" title="ReconForge Security Dashboard">
+          <svg class="brand-mark" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2L3 6.5v5.5c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V6.5L12 2z"/>
+            <circle cx="12" cy="12" r="3"/>
+          </svg>
+          <span class="brand-text">ReconForge</span>
+        </a>
 
-    <div class="rail-group">
-      <div class="rail-section-label">Operations</div>
-      <a href="/" data-nav="overview">
-        <svg class="nav-icon" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="2.5" y="2.5" width="6" height="6" rx="1.2"/>
-          <rect x="11.5" y="2.5" width="6" height="6" rx="1.2"/>
-          <rect x="2.5" y="11.5" width="6" height="6" rx="1.2"/>
-          <rect x="11.5" y="11.5" width="6" height="6" rx="1.2"/>
-        </svg>
-        <span>Dashboard</span>
-      </a>
-      <a href="/assets" data-nav="assets">
-        <svg class="nav-icon" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="10" cy="10" r="7.5"/>
-          <line x1="2.5" y1="10" x2="17.5" y2="10"/>
-          <path d="M10 2.5a11.5 11.5 0 013 7.5 11.5 11.5 0 01-3 7.5 11.5 11.5 0 01-3-7.5 11.5 11.5 0 013-7.5z"/>
-        </svg>
-        <span>Reconnaissance</span>
-      </a>
-      <a href="/scans" data-nav="scans scan">
-        <svg class="nav-icon" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="2 10 5.5 10 8 4.5 12 15.5 14.5 10 18 10"/>
-        </svg>
-        <span>Vulnerability Scanner</span>
-      </a>
-    </div>
+        <nav class="header-nav" id="main-nav" aria-label="Dashboard sections">
+          <button type="button" class="nav-tab active" data-section="overview">Overview</button>
+          <button type="button" class="nav-tab" data-section="recon">Recon</button>
+          <button type="button" class="nav-tab" data-section="scanner">Scanner</button>
+          <button type="button" class="nav-tab" data-section="findings">Findings</button>
+          <button type="button" class="nav-tab" data-section="reports">Reports</button>
+          <button type="button" class="nav-tab" data-section="targets">Targets</button>
+        </nav>
+      </div>
 
-    <div class="rail-group">
-      <div class="rail-section-label">Surface &amp; Risk</div>
-      <a href="/findings" data-nav="findings">
-        <svg class="nav-icon" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M10 3L2 16.5h16L10 3z"/>
-          <line x1="10" y1="8.5" x2="10" y2="12"/>
-          <circle cx="10" cy="14.3" r="0.6" fill="currentColor"/>
-        </svg>
-        <span>Results &amp; Findings</span>
-      </a>
-      <a href="/projects" data-nav="projects project wizard">
-        <svg class="nav-icon" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M2.5 5.5a1.5 1.5 0 011.5-1.5h3.6a1.5 1.5 0 011.1.48l1.2 1.32h6.1a1.5 1.5 0 011.5 1.5v7.2a1.5 1.5 0 01-1.5 1.5H4a1.5 1.5 0 01-1.5-1.5V5.5z"/>
-        </svg>
-        <span>Targets &amp; Scope</span>
-      </a>
-    </div>
+      <div class="header-right">
+        <div class="search-wrap" id="global-search-wrap">
+          <svg class="search-icon" viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="9" cy="9" r="6"/>
+            <line x1="13.5" y1="13.5" x2="18" y2="18"/>
+          </svg>
+          <input type="search" id="global-search-input" placeholder="Search targets, assets, findings... ( / )" autocomplete="off" aria-label="Global search" />
+          <kbd class="search-kbd">/</kbd>
+          <div class="search-results-dropdown" id="search-results-dropdown"></div>
+        </div>
 
-    <div class="rail-group">
-      <div class="rail-section-label">System</div>
-      <a href="/tools" data-nav="tools">
-        <svg class="nav-icon" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M14.5 6.5a4 4 0 01-5.2 3.8L4.8 14.8a1.4 1.4 0 01-2-2l4.5-4.5a4 4 0 013.8-5.2l-2.1 2.1 2.3 2.3 2.1-2.1z"/>
-        </svg>
-        <span>Tool Health</span>
-      </a>
-      <a href="/settings" data-nav="settings">
-        <svg class="nav-icon" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="10" cy="10" r="2.6"/>
-          <path d="M16.2 12.2a1.2 1.2 0 00.24 1.32l.05.05a1.45 1.45 0 01-2.05 2.05l-.05-.05a1.2 1.2 0 00-1.32-.24 1.2 1.2 0 00-.72 1.1v.14a1.45 1.45 0 01-2.9 0v-.07a1.2 1.2 0 00-.78-1.1 1.2 1.2 0 00-1.32.24l-.05.05a1.45 1.45 0 01-2.05-2.05l.05-.05a1.2 1.2 0 00.24-1.32 1.2 1.2 0 00-1.1-.72H4.3a1.45 1.45 0 010-2.9h.07a1.2 1.2 0 001.1-.78 1.2 1.2 0 00-.24-1.32l-.05-.05a1.45 1.45 0 012.05-2.05l.05.05a1.2 1.2 0 001.32.24h.06a1.2 1.2 0 00.72-1.1V4.3a1.45 1.45 0 012.9 0v.07a1.2 1.2 0 00.72 1.1 1.2 1.2 0 001.32-.24l.05-.05a1.45 1.45 0 012.05 2.05l-.05.05a1.2 1.2 0 00-.24 1.32v.06a1.2 1.2 0 001.1.72h.14a1.45 1.45 0 010 2.9h-.07a1.2 1.2 0 00-1.1.72z"/>
-        </svg>
-        <span>Settings</span>
-      </a>
-    </div>
+        <div class="scanner-status-badge" id="header-scanner-status" title="Scanner status">
+          <span class="status-pulse-dot" id="status-pulse-dot"></span>
+          <span class="status-text" id="header-status-text">Scanner Idle</span>
+        </div>
 
-    <div class="rail-status" id="rail-status">
-      <span class="status-pulse-dot"></span>
-      <span class="rail-status-text">Scanner Idle</span>
-    </div>
+        <div class="notifications-wrap" id="notifications-wrap">
+          <button type="button" class="icon-btn" id="notif-btn" aria-label="Notifications" title="Notifications">
+            <svg viewBox="0 0 20 20" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M15 14c.7 0 1 .4 1 1s-.4 1-1 1H5c-.6 0-1-.4-1-1s.3-1 1-1v-4a5 5 0 0110 0v4z"/>
+              <path d="M8.5 17a1.5 1.5 0 003 0"/>
+            </svg>
+            <span class="notif-badge" id="notif-badge"></span>
+          </button>
+          <div class="notif-dropdown" id="notif-dropdown">
+            <div class="notif-head">
+              <b>Notifications</b>
+              <button type="button" class="btn-link" id="clear-notifs-btn">Clear</button>
+            </div>
+            <div class="notif-list" id="notif-list">
+              <p class="muted small text-center" style="padding:12px">No new alerts</p>
+            </div>
+          </div>
+        </div>
 
-    <div class="rail-credit">
-      <p class="rail-note">v1.0.0 · Local only</p>
-      <p class="rail-author">By <a href="https://github.com/anilkashyap01" target="_blank" rel="noopener noreferrer">Anil Kashyap</a></p>
-    </div>
-  </nav>
+        <button type="button" class="icon-btn" id="settings-btn" aria-label="Settings" title="Settings & Tools">
+          <svg viewBox="0 0 20 20" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="10" cy="10" r="2.6"/>
+            <path d="M16.2 12.2a1.2 1.2 0 00.24 1.32l.05.05a1.45 1.45 0 01-2.05 2.05l-.05-.05a1.2 1.2 0 00-1.32-.24 1.2 1.2 0 00-.72 1.1v.14a1.45 1.45 0 01-2.9 0v-.07a1.2 1.2 0 00-.78-1.1 1.2 1.2 0 00-1.32.24l-.05.05a1.45 1.45 0 01-2.05-2.05l.05-.05a1.2 1.2 0 00.24-1.32 1.2 1.2 0 00-1.1-.72H4.3a1.45 1.45 0 010-2.9h.07a1.2 1.2 0 001.1-.78 1.2 1.2 0 00-.24-1.32l-.05-.05a1.45 1.45 0 012.05-2.05l.05.05a1.2 1.2 0 001.32.24h.06a1.2 1.2 0 00.72-1.1V4.3a1.45 1.45 0 012.9 0v.07a1.2 1.2 0 00.72 1.1 1.2 1.2 0 001.32-.24l.05-.05a1.45 1.45 0 012.05 2.05l-.05.05a1.2 1.2 0 00-.24 1.32v.06a1.2 1.2 0 001.1.72h.14a1.45 1.45 0 010 2.9h-.07a1.2 1.2 0 00-1.1.72z"/>
+          </svg>
+        </button>
 
-  <div class="workspace">
-    <header class="topbar" aria-label="Workspace controls">
-      <div class="topbar-left">
-        <button type="button" id="nav-toggle" class="btn ghost icon-btn" aria-label="Toggle navigation" aria-expanded="false">
-          <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round">
+        <button type="button" class="icon-btn mobile-menu-btn" id="mobile-menu-btn" aria-label="Toggle Navigation">
+          <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
             <line x1="3" y1="5.5" x2="17" y2="5.5"/>
             <line x1="3" y1="10" x2="17" y2="10"/>
             <line x1="3" y1="14.5" x2="17" y2="14.5"/>
           </svg>
         </button>
-        <span id="topbar-crumb" class="topbar-crumb">{{ title }}</span>
       </div>
+    </div>
 
-      <div class="topbar-right">
-        <div class="project-switcher" id="project-switcher">
-          <label for="global-project-select" class="sr-only">Active project</label>
-          <select id="global-project-select" title="Switch active project">
-            <option value="">No project selected</option>
-          </select>
-          <button type="button" id="topbar-new-scan" class="btn primary sm" disabled title="Select or create a project first">New scan</button>
-        </div>
+    <!-- Mobile Nav Dropdown -->
+    <div class="mobile-nav-dropdown" id="mobile-nav-dropdown">
+      <button type="button" class="mobile-nav-item active" data-section="overview">Overview</button>
+      <button type="button" class="mobile-nav-item" data-section="recon">Recon</button>
+      <button type="button" class="mobile-nav-item" data-section="scanner">Scanner</button>
+      <button type="button" class="mobile-nav-item" data-section="findings">Findings</button>
+      <button type="button" class="mobile-nav-item" data-section="reports">Reports</button>
+      <button type="button" class="mobile-nav-item" data-section="targets">Targets</button>
+    </div>
+  </header>
 
-        <button type="button" id="theme-toggle" class="btn ghost sm" aria-label="Switch color theme" title="Theme: System (click to cycle System / Dark / Light)">
-          <span id="theme-label">Theme: Auto</span>
-        </button>
-      </div>
-    </header>
-
-    <main id="app" class="main"><p class="muted">Loading</p></main>
-  </div>
+  <main id="app" class="main-dashboard-content"></main>
 </div>
 <div id="toast" role="status" aria-live="polite"></div>
-<script src="/static/app.js?v=6.0"></script>
+<div id="modal-root"></div>
+<script src="/static/app.js?v=7.0"></script>
 </body>
 </html>
