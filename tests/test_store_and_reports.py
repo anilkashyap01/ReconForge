@@ -115,4 +115,8 @@ def test_html_report_escapes_untrusted_content_and_files_are_private():
     html = paths["html"].read_text()
     assert evil not in html and "&lt;script&gt;" in html
     assert json.loads(paths["json"].read_text())["findings"][0]["title"] == evil     # JSON keeps the raw value
+    assert "csv" in paths and paths["csv"].exists()
+    assert "severity,title,asset,url" in paths["csv"].read_text()
     assert oct(paths["html"].stat().st_mode & 0o777) == "0o600"
+    assert oct(paths["csv"].stat().st_mode & 0o777) == "0o600"
+

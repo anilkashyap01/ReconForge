@@ -162,6 +162,20 @@ function downloadCSV(filename, rows) {
   toast("CSV exported successfully");
 }
 
+function downloadJSON(filename, data) {
+  if (!data) return toast("No data to export", true);
+  const jsonStr = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+  const blob = new Blob([jsonStr], { type: "application/json;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = h("a", { href: url, download: filename });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  toast("JSON exported successfully");
+}
+
+
 /* ==========================================================================
    Modal Dialog Framework
    ========================================================================== */
@@ -563,8 +577,8 @@ async function loadSinglePageDashboard() {
       h("div", { class: "active-scan-info" },
         h("span", { class: "status-pulse-dot active" }),
         h("b", {}, "Scan #" + runningScan.id + " (" + runningScan.profile + ")"),
-        h("span", { class: "muted small" }, "running for " + runningScan.project),
-        h("div", { class: "scan-progress-bar" }, h("div", { class: "scan-progress-fill", style: "width:65%" }))
+        h("span", { class: "muted small", id: "active-scan-stage-label" }, "running for " + runningScan.project),
+        h("div", { class: "scan-progress-bar" }, h("div", { class: "scan-progress-fill", id: "active-scan-progress-fill", style: "width:15%" }))
       ),
       h("div", { style: "display:flex;gap:6px" },
         h("button", {
@@ -637,7 +651,7 @@ async function loadSinglePageDashboard() {
     },
       h("div", { class: "stat-kpi-icon" }, svgIcon(ICONS.tools, 18)),
       h("div", { class: "stat-kpi-info" },
-        h("span", { class: "stat-kpi-val" }, String(overview.ports || (overview.assets ? Math.round(overview.assets * 1.5) : 0))),
+        h("span", { class: "stat-kpi-val" }, String(overview.ports || 0)),
         h("span", { class: "stat-kpi-label" }, "Open Ports")
       )
     ),
@@ -706,16 +720,31 @@ async function loadSinglePageDashboard() {
   if (runningScan) {
     scanPollTimer = setInterval(async () => {
       try {
-        const ov = await api("/api/overview");
+        const [ov, scanDetail] = await Promise.all([
+          api("/api/overview"),
+          api("/api/scans/" + runningScan.id).catch(() => null)
+        ]);
         const stillRunning = (ov.recent_scans || []).find((s) => s.status === "running" || s.status === "queued");
         updateScannerHeaderStatus(stillRunning);
+
+        if (scanDetail && scanDetail.stages && scanDetail.stages.length) {
+          const stages = scanDetail.stages;
+          const completedCount = stages.filter((st) => ["completed", "empty", "partial", "cached", "skipped"].includes(st.status)).length;
+          const pct = Math.max(10, Math.round((completedCount / stages.length) * 100));
+          const curStage = stages.find((st) => st.status === "running") || stages.find((st) => st.status === "pending");
+          const fillEl = document.getElementById("active-scan-progress-fill");
+          const lblEl = document.getElementById("active-scan-stage-label");
+          if (fillEl) fillEl.style.width = pct + "%";
+          if (lblEl) lblEl.textContent = curStage ? "Stage: " + curStage.label + " (" + pct + "%)" : scanDetail.status;
+        }
+
         if (!stillRunning && runningScan) {
           clearInterval(scanPollTimer);
           addNotification("Scan Completed", "Scan #" + runningScan.id + " has finished.");
           loadSinglePageDashboard();
         }
       } catch (e) { /* ignore */ }
-    }, 4000);
+    }, 2500);
   }
 }
 
@@ -988,7 +1017,12 @@ async function renderFindingsSection(container) {
           type: "button",
           class: "btn secondary sm",
           onclick: () => downloadCSV("findings.csv", findingsData)
-        }, svgIcon(ICONS.download, 13), "Export Findings"),
+        }, svgIcon(ICONS.download, 13), "Export CSV"),
+        h("button", {
+          type: "button",
+          class: "btn secondary sm",
+          onclick: () => downloadJSON("findings.json", findingsData)
+        }, svgIcon(ICONS.download, 13), "Export JSON"),
         h("button", {
           type: "button",
           class: "btn secondary sm",
@@ -1239,8 +1273,8 @@ async function inspectFinding(fid) {
       h("div", {},
         h("h4", { class: "detail-section-title" }, "Recommended Remediation & References"),
         h("p", { style: "margin:0 0 6px" }, f.remediation || "Ensure sensitive endpoints require authentication and proper access controls. Keep software dependencies updated to supported releases."),
-        f.references && f.references.length
-          ? h("ul", { style: "margin:4px 0;padding-left:18px" }, f.references.map((ref) => h("li", {}, h("a", { href: ref, target: "_blank", rel: "noopener noreferrer" }, ref))))
+        (f.refs && f.refs.length) || (f.references && f.references.length)
+          ? h("ul", { style: "margin:4px 0;padding-left:18px" }, (f.refs || f.references).map((ref) => h("li", {}, h("a", { href: ref, target: "_blank", rel: "noopener noreferrer" }, ref))))
           : h("span", { class: "muted small" }, "No external reference advisories linked.")
       ),
 
@@ -1466,13 +1500,44 @@ async function renderActivitySection(container) {
         contentBox.append(h("div", { class: "empty-state" }, "No scan logs available."));
         return;
       }
+
+      const scanSelect = h("select", {
+        style: "min-width:220px",
+        onchange: (e) => {
+          activitySelectedScanId = parseInt(e.target.value, 10);
+          renderActivityContent();
+        }
+      },
+        recentScansData.map((s) => h("option", { value: String(s.id), selected: s.id === scanIdToView }, "Scan #" + s.id + " (" + s.profile + ") - " + s.project))
+      );
+
+      const btnDownload = h("button", {
+        type: "button",
+        class: "btn secondary sm",
+        onclick: () => window.open("/api/scans/" + scanIdToView + "/logs.txt", "_blank")
+      }, svgIcon(ICONS.download, 12), "Download Logs");
+
       try {
         const logData = await api("/api/scans/" + scanIdToView + "/logs");
-        const logs = (logData && logData.logs) || [];
-        const term = h("div", { class: "terminal-output", style: "margin:var(--sp-4)" },
-          logs.length ? logs.map((l) => (l.created_at ? "[" + l.created_at.slice(11, 19) + "] " : "") + l.message).join("\n") : "(No log lines recorded for scan #" + scanIdToView + ")"
+        const logs = Array.isArray(logData) ? logData : ((logData && logData.logs) || []);
+        const term = h("div", { class: "terminal-output" },
+          logs.length
+            ? logs.map((l) => {
+                const ts = l.ts || l.created_at || "";
+                const timePrefix = ts ? "[" + ts.slice(11, 19) + "] " : "";
+                const lvl = l.level ? "[" + l.level.toUpperCase() + "] " : "";
+                return timePrefix + lvl + l.message;
+              }).join("\n")
+            : "(No log lines recorded for scan #" + scanIdToView + ")"
         );
-        contentBox.append(term);
+        const wrapper = h("div", { style: "padding:var(--sp-4);display:flex;flex-direction:column;gap:10px" },
+          h("div", { style: "display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px" },
+            scanSelect,
+            btnDownload
+          ),
+          term
+        );
+        contentBox.append(wrapper);
       } catch (e) {
         contentBox.append(h("div", { class: "empty-state" }, "Could not load logs: " + e.message));
       }
@@ -1480,6 +1545,73 @@ async function renderActivitySection(container) {
   }
 
   renderActivityContent();
+}
+
+function openExecutiveSummaryModal() {
+  const activeProj = allProjects.find((p) => String(p.id) === String(activePid)) || allProjects[0];
+  const targetName = activeProj ? activeProj.name : "All Target Assets";
+  const crit = (cachedFindingsBySev && cachedFindingsBySev.critical) || 0;
+  const high = (cachedFindingsBySev && cachedFindingsBySev.high) || 0;
+  const med = (cachedFindingsBySev && cachedFindingsBySev.medium) || 0;
+  const low = (cachedFindingsBySev && cachedFindingsBySev.low) || 0;
+  const info = (cachedFindingsBySev && cachedFindingsBySev.info) || 0;
+  const totalFindings = crit + high + med + low + info;
+
+  let postureRating = "Good (Low Risk)";
+  let postureColor = "#059669";
+  if (crit > 0) {
+    postureRating = "Critical (Immediate Action Required)";
+    postureColor = "var(--critical)";
+  } else if (high > 0) {
+    postureRating = "High Risk (Remediation Needed)";
+    postureColor = "#C2410C";
+  } else if (med > 0) {
+    postureRating = "Moderate Risk";
+    postureColor = "#92400E";
+  }
+
+  const content = h("div", { style: "display:flex;flex-direction:column;gap:16px" },
+    h("div", { class: "dashboard-card", style: "padding:16px;background:var(--panel-hover)" },
+      h("h4", { style: "margin:0 0 6px" }, "Executive Risk Posture — " + targetName),
+      h("div", { style: "font-size:16px;font-weight:700;color:" + postureColor }, postureRating),
+      h("p", { class: "muted small", style: "margin:6px 0 0" },
+        "Surface reconnaissance & vulnerability posture summary across " +
+        (cachedOverview.assets || 0) + " assets, " +
+        (cachedOverview.endpoints || 0) + " HTTP endpoints, and " +
+        (cachedOverview.ports || 0) + " open ports."
+      )
+    ),
+    h("div", { style: "display:grid;grid-template-columns:repeat(auto-fit, minmax(90px, 1fr));gap:8px" },
+      h("div", { class: "stat-kpi-card", style: "padding:10px;text-align:center" },
+        h("span", { class: "sev-badge critical" }, "Critical: " + crit)
+      ),
+      h("div", { class: "stat-kpi-card", style: "padding:10px;text-align:center" },
+        h("span", { class: "sev-badge high" }, "High: " + high)
+      ),
+      h("div", { class: "stat-kpi-card", style: "padding:10px;text-align:center" },
+        h("span", { class: "sev-badge medium" }, "Medium: " + med)
+      ),
+      h("div", { class: "stat-kpi-card", style: "padding:10px;text-align:center" },
+        h("span", { class: "sev-badge low" }, "Low: " + low)
+      ),
+      h("div", { class: "stat-kpi-card", style: "padding:10px;text-align:center" },
+        h("span", { class: "sev-badge info" }, "Info: " + info)
+      )
+    ),
+    h("div", { class: "dashboard-card", style: "padding:14px" },
+      h("h4", { style: "margin:0 0 8px" }, "Analyst Remediation Roadmap"),
+      h("ul", { style: "margin:0;padding-left:18px", class: "small" },
+        h("li", {}, "Prioritize unvalidated and confirmed Critical/High vulnerabilities first."),
+        h("li", {}, "Verify access controls and authentication on discovered HTTP endpoints."),
+        h("li", {}, "Ensure unnecessary open ports identified during Naabu scanning are filtered.")
+      )
+    )
+  );
+
+  openModal("Executive Posture Summary", content, [
+    h("button", { type: "button", class: "btn secondary", onclick: closeModal }, "Close"),
+    h("button", { type: "button", class: "btn primary", onclick: () => window.print() }, "Print / PDF")
+  ], true);
 }
 
 /* ==========================================================================
@@ -1535,19 +1667,49 @@ function renderReportsSection(container) {
                 if (sid) window.open("/api/scans/" + sid + "/report.json", "_blank");
                 else toast("Select a valid scan first", true);
               }
-            }, svgIcon(ICONS.download, 13), "Download JSON")
+            }, svgIcon(ICONS.download, 13), "Download JSON"),
+            h("button", {
+              type: "button",
+              class: "btn secondary sm",
+              disabled: !recentScansData.length,
+              onclick: () => {
+                const sid = scanSelect.value || (recentScansData[0] && recentScansData[0].id);
+                if (sid) window.open("/api/scans/" + sid + "/report.csv", "_blank");
+                else toast("Select a valid scan first", true);
+              }
+            }, svgIcon(ICONS.download, 13), "Download CSV"),
+            h("button", {
+              type: "button",
+              class: "btn secondary sm",
+              disabled: !recentScansData.length,
+              onclick: () => {
+                const sid = scanSelect.value || (recentScansData[0] && recentScansData[0].id);
+                if (sid) window.open("/api/scans/" + sid + "/logs.txt", "_blank");
+                else toast("Select a valid scan first", true);
+              }
+            }, svgIcon(ICONS.download, 13), "Download All Logs")
           )
         ),
         // Executive Summary
         h("div", { class: "dashboard-card", style: "padding:16px" },
-          h("h4", { style: "margin:0 0 6px" }, "Executive Posture Summary & CSVs"),
-          h("p", { class: "muted small", style: "margin:0 0 14px" }, "Export structured findings and discovered assets inventory directly to CSV spreadsheets."),
+          h("h4", { style: "margin:0 0 6px" }, "Executive Posture Summary & Exports"),
+          h("p", { class: "muted small", style: "margin:0 0 14px" }, "View high-level posture assessment or export structured findings and assets."),
           h("div", { style: "display:flex;gap:8px;flex-wrap:wrap" },
+            h("button", {
+              type: "button",
+              class: "btn primary sm",
+              onclick: openExecutiveSummaryModal
+            }, svgIcon(ICONS.reports, 13), "Executive Summary"),
             h("button", {
               type: "button",
               class: "btn secondary sm",
               onclick: () => downloadCSV("findings-export.csv", findingsData)
             }, svgIcon(ICONS.download, 13), "Export Findings CSV"),
+            h("button", {
+              type: "button",
+              class: "btn secondary sm",
+              onclick: () => downloadJSON("findings-export.json", findingsData)
+            }, svgIcon(ICONS.download, 13), "Export Findings JSON"),
             h("button", {
               type: "button",
               class: "btn secondary sm",
@@ -1595,8 +1757,27 @@ async function renderTargetsSection(container, activeProject) {
     const proj = await api("/api/projects/" + activeProject.id);
     const scopeRules = proj.scope || [];
 
-    const inScope = scopeRules.filter((s) => !s.is_exclusion);
-    const outScope = scopeRules.filter((s) => s.is_exclusion);
+    const inScope = scopeRules.filter((s) => !s.excluded);
+    const outScope = scopeRules.filter((s) => !!s.excluded);
+    const displayTarget = (s) => (s.kind === "wildcard" ? "*." : "") + s.value;
+
+    const renderRuleItem = (s) => h("li", { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:6px" },
+      h("span", { class: "mono small" }, displayTarget(s)),
+      h("button", {
+        type: "button",
+        class: "btn danger sm",
+        style: "padding:1px 6px;font-size:11px;min-height:unset",
+        title: "Delete rule",
+        onclick: async () => {
+          if (!confirm("Delete scope entry " + displayTarget(s) + "?")) return;
+          try {
+            await api("/api/projects/" + proj.id + "/scope/" + s.id, "DELETE");
+            toast("Scope rule deleted");
+            renderTargetsSection(container, activeProject);
+          } catch (e) { toast(e.message, true); }
+        }
+      }, "\u2715")
+    );
 
     const targetBox = h("div", { style: "display:flex;flex-direction:column;gap:16px" },
       h("div", { style: "display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px" },
@@ -1633,14 +1814,14 @@ async function renderTargetsSection(container, activeProject) {
         h("div", { class: "dashboard-card", style: "padding:14px" },
           h("h4", { style: "margin:0 0 8px;color:#059669" }, "In-Scope Boundaries (" + inScope.length + ")"),
           inScope.length
-            ? h("ul", { style: "margin:0;padding-left:18px" }, inScope.map((s) => h("li", { class: "mono small" }, s.target)))
+            ? h("ul", { style: "margin:0;padding-left:18px" }, inScope.map(renderRuleItem))
             : h("p", { class: "muted small", style: "margin:0" }, "No in-scope rules defined.")
         ),
         // Exclusions
         h("div", { class: "dashboard-card", style: "padding:14px" },
           h("h4", { style: "margin:0 0 8px;color:var(--critical)" }, "Out-of-Scope Exclusions (" + outScope.length + ")"),
           outScope.length
-            ? h("ul", { style: "margin:0;padding-left:18px" }, outScope.map((s) => h("li", { class: "mono small" }, s.target)))
+            ? h("ul", { style: "margin:0;padding-left:18px" }, outScope.map(renderRuleItem))
             : h("p", { class: "muted small", style: "margin:0" }, "No exclusions defined.")
         )
       ),
@@ -1659,27 +1840,27 @@ async function renderTargetsSection(container, activeProject) {
           h("button", {
             type: "button",
             class: "btn secondary sm",
-            onclick: () => {
+            onclick: async () => {
               const val = document.getElementById("scope-tester-input").value.trim();
               const resEl = document.getElementById("scope-tester-result");
               if (!val) return;
-              const isIn = inScope.some((s) => {
-                if (s.target.startsWith("*.")) {
-                  const apex = s.target.slice(2);
-                  return val.endsWith("." + apex);
+              resEl.textContent = "Verifying target with backend scope engine...";
+              resEl.style.color = "var(--muted)";
+              try {
+                const res = await api("/api/projects/" + activeProject.id + "/scope/test", "POST", { candidate: val });
+                if (res.in_scope) {
+                  resEl.textContent = "\u2714 IN SCOPE: Authorized for testing (" + res.reason + ")";
+                  resEl.style.color = "#059669";
+                } else if (res.is_exclusion) {
+                  resEl.textContent = "\u2716 EXCLUDED: Out-of-scope rule matches (" + res.reason + ")";
+                  resEl.style.color = "var(--critical)";
+                } else {
+                  resEl.textContent = "\u26A0 NOT IN SCOPE: " + res.reason;
+                  resEl.style.color = "var(--muted)";
                 }
-                return s.target === val;
-              });
-              const isOut = outScope.some((s) => s.target === val);
-              if (isOut) {
-                resEl.textContent = "\u2716 EXCLUDED: Out-of-scope rule matches (" + val + ")";
+              } catch (e) {
+                resEl.textContent = "\u2716 Scope verification error: " + e.message;
                 resEl.style.color = "var(--critical)";
-              } else if (isIn) {
-                resEl.textContent = "\u2714 IN SCOPE: Authorized for testing (" + val + ")";
-                resEl.style.color = "#059669";
-              } else {
-                resEl.textContent = "\u26A0 NOT IN SCOPE: Boundary rejected under rule set";
-                resEl.style.color = "var(--muted)";
               }
             }
           }, "Test Boundary")
@@ -1883,7 +2064,7 @@ function openScanWizardModal(project) {
 
       try {
         const proj = await api("/api/projects/" + project.id);
-        const scopeIds = (proj.scope || []).filter((s) => !s.is_exclusion).map((s) => s.id);
+        const scopeIds = (proj.scope || []).filter((s) => !s.excluded).map((s) => s.id);
         if (!scopeIds.length) return toast("No in-scope rules found for this target", true);
 
         const res = await api("/api/projects/" + project.id + "/scans", "POST", {
@@ -1916,7 +2097,7 @@ function openScanWizardModal(project) {
 async function launchQuickRecon(project) {
   try {
     const proj = await api("/api/projects/" + project.id);
-    const scopeIds = (proj.scope || []).filter((s) => !s.is_exclusion).map((s) => s.id);
+    const scopeIds = (proj.scope || []).filter((s) => !s.excluded).map((s) => s.id);
     if (!scopeIds.length) return toast("No in-scope entries defined for this target", true);
 
     const res = await api("/api/projects/" + project.id + "/scans", "POST", {
@@ -2075,16 +2256,35 @@ async function openSettingsModal() {
   // Pane 3: Tool Health Matrix
   const paneTools = h("div", { class: "modal-pane", "data-pane": "tools" },
     h("h4", { style: "margin:0" }, "Tool Health & Environment Diagnostics"),
-    h("p", { class: "muted small", style: "margin:0" }, "Status of CLI scanner executables installed in system PATH on Kali Linux:"),
-    h("div", { class: "table-wrap", style: "max-height:260px;overflow-y:auto" },
+    h("p", { class: "muted small", style: "margin:0 0 10px" }, "Status of CLI scanner executables installed in system PATH on Kali Linux:"),
+    h("div", { class: "table-wrap", style: "max-height:300px;overflow-y:auto" },
       h("table", { class: "compact-table" },
-        h("thead", {}, h("tr", {}, h("th", {}, "Tool"), h("th", {}, "Status"), h("th", {}, "Version"), h("th", {}, "Role"))),
-        h("tbody", {}, tools.map((t) => h("tr", {},
-          h("td", { class: "mono", style: "font-weight:600" }, t.name),
-          h("td", {}, h("span", { class: t.detected ? "scope-badge-safe" : "sev-badge critical" }, t.detected ? "Detected" : "Missing")),
-          h("td", { class: "mono small" }, t.version || "-"),
-          h("td", { class: "muted small" }, t.role)
-        )))
+        h("thead", {}, h("tr", {},
+          h("th", {}, "Tool"),
+          h("th", {}, "Status"),
+          h("th", {}, "Version"),
+          h("th", {}, "System Path / Package"),
+          h("th", {}, "Role")
+        )),
+        h("tbody", {}, tools.map((t) => {
+          const isOk = !!t.installed;
+          const statusBadge = h("span", {
+            class: isOk ? "scope-badge-safe" : "sev-badge critical",
+            style: "display:inline-flex;align-items:center;gap:4px"
+          }, svgIcon(isOk ? ICONS.check : ICONS.stop, 12), isOk ? "Installed" : "Missing");
+          const verText = t.version || (isOk ? "detected" : "-");
+          const pathOrPkg = isOk ? (t.path || "-") : ("sudo apt install " + (t.kali_package || t.name));
+          return h("tr", {},
+            h("td", {},
+              h("b", { class: "mono" }, t.label || t.name),
+              t.core ? h("span", { class: "scope-tag", style: "margin-left:6px;font-size:10px" }, "Core") : null
+            ),
+            h("td", {}, statusBadge),
+            h("td", { class: "mono small" }, verText + (t.template_version ? " (tpl: " + t.template_version + ")" : "")),
+            h("td", { class: "mono small muted" }, pathOrPkg),
+            h("td", { class: "muted small" }, t.description || (t.core ? "Core discovery tool" : "Optional scanner"))
+          );
+        }))
       )
     )
   );

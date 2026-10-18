@@ -17,7 +17,7 @@ from fastapi.templating import Jinja2Templates
 from .config import HARD_MAX, Limits, SecretStore, effective_limits, get_settings
 from .database import get_setting, init_db, now, q, q1, set_setting
 from .database import db
-from .models import (PROFILES, FindingUpdate, IntegrationUpdate, LimitsUpdate, ProjectCreate, ScanCreate, ScanStatus, ScopeAdd)
+from .models import (PROFILES, FindingUpdate, IntegrationUpdate, LimitsUpdate, ProjectCreate, ScanCreate, ScanStatus, ScopeAdd, ScopeTestRequest)
 from .scheduler import Scheduler
 from .scope import Scope, ScopeError, parse_scope_entry, safe_path_under, validate_ident_list, validate_port_spec
 from .services import providers, reports, store
@@ -97,16 +97,22 @@ for path, name, title in [("/", "overview", "Overview"), ("/projects", "projects
 
 # ------------------------------------------------------------------ overview and projects
 @app.get("/api/overview")
-def overview():
+def overview(project_id: int | None = None):
     with db() as c:
-        sev = {r["severity"]: r["n"] for r in q(c, "SELECT severity, COUNT(*) n FROM findings WHERE validation_status IN ('unvalidated','confirmed') GROUP BY severity")}
-        recent = q(c, "SELECT s.id,s.profile,s.status,s.created_at,s.completed_at,s.summary_json,p.name project, p.id project_id FROM scans s JOIN projects p ON p.id=s.project_id ORDER BY s.id DESC LIMIT 8")
+        sev = {r["severity"]: r["n"] for r in q(c, "SELECT severity, COUNT(*) n FROM findings WHERE validation_status IN ('unvalidated','confirmed') AND (? IS NULL OR project_id=?) GROUP BY severity", (project_id, project_id))}
+        recent = q(c, "SELECT s.id,s.profile,s.status,s.created_at,s.completed_at,s.summary_json,p.name project, p.id project_id FROM scans s JOIN projects p ON p.id=s.project_id WHERE (? IS NULL OR s.project_id=?) ORDER BY s.id DESC LIMIT 8", (project_id, project_id))
         for r in recent:
             r["summary"] = json.loads(r.pop("summary_json") or "{}")
-        return {"projects": q1(c, "SELECT COUNT(*) n FROM projects")["n"], "assets": q1(c, "SELECT COUNT(*) n FROM assets")["n"],
-                "endpoints": q1(c, "SELECT COUNT(*) n FROM endpoints")["n"],
-                "open_findings": sum(sev.values()), "findings_by_severity": sev, "recent_scans": recent,
-                "active_scans": q1(c, "SELECT COUNT(*) n FROM scans WHERE status IN ('queued','running','paused')")["n"]}
+        return {
+            "projects": q1(c, "SELECT COUNT(*) n FROM projects")["n"],
+            "assets": q1(c, "SELECT COUNT(*) n FROM assets WHERE (? IS NULL OR project_id=?)", (project_id, project_id))["n"],
+            "endpoints": q1(c, "SELECT COUNT(*) n FROM endpoints WHERE (? IS NULL OR project_id=?)", (project_id, project_id))["n"],
+            "ports": q1(c, "SELECT COUNT(*) n FROM ports WHERE (? IS NULL OR project_id=?)", (project_id, project_id))["n"],
+            "open_findings": sum(sev.values()),
+            "findings_by_severity": sev,
+            "recent_scans": recent,
+            "active_scans": q1(c, "SELECT COUNT(*) n FROM scans WHERE status IN ('queued','running','paused') AND (? IS NULL OR project_id=?)", (project_id, project_id))["n"],
+        }
 
 
 @app.get("/api/projects")
@@ -165,6 +171,37 @@ def delete_scope(pid: int, eid: int):
     with db() as c:
         c.execute("DELETE FROM scope_entries WHERE id=? AND project_id=?", (eid, pid))
     return {"ok": True}
+
+
+@app.post("/api/projects/{pid}/scope/test")
+def test_project_scope(pid: int, body: ScopeTestRequest):
+    candidate = body.candidate.strip()
+    if not candidate:
+        raise HTTPException(400, "Candidate cannot be empty")
+    with db() as c:
+        project = need(q1(c, "SELECT * FROM projects WHERE id=?", (pid,)))
+        rows = q(c, "SELECT * FROM scope_entries WHERE project_id=?", (pid,))
+    from .scope import ScopeEntry
+    include = [ScopeEntry(r["kind"], r["value"]).display() for r in rows if not r["excluded"]]
+    exclude = [ScopeEntry(r["kind"], r["value"]).display() for r in rows if r["excluded"]]
+    if not include:
+        return {
+            "candidate": candidate,
+            "in_scope": False,
+            "reason": "No in-scope rules defined for this project",
+            "is_exclusion": False,
+        }
+    scope = Scope.from_strings(include, exclude)
+    if candidate.startswith("http://") or candidate.startswith("https://"):
+        ok, reason = scope.url_allowed(candidate)
+    else:
+        ok, reason = scope.host_allowed(candidate)
+    return {
+        "candidate": candidate,
+        "in_scope": ok,
+        "reason": reason,
+        "is_exclusion": "excluded" in reason.lower(),
+    }
 
 
 @app.delete("/api/projects/{pid}")
@@ -241,6 +278,20 @@ def scan_logs(sid: int, after: int = 0):
         return q(c, "SELECT id,ts,level,message FROM scan_logs WHERE scan_id=? AND id>? ORDER BY id LIMIT 500", (sid, after))
 
 
+@app.get("/api/scans/{sid}/logs.txt")
+def download_scan_logs(sid: int):
+    with db() as c:
+        need(q1(c, "SELECT id FROM scans WHERE id=?", (sid,)))
+        rows = q(c, "SELECT ts,level,message FROM scan_logs WHERE scan_id=? ORDER BY id", (sid,))
+    lines = [f"[{r['ts']}] [{r['level'].upper()}] {r['message']}" for r in rows]
+    content = "\n".join(lines) if lines else f"(No logs recorded for scan #{sid})"
+    return Response(
+        content=content,
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="reconforge-scan-{sid}-logs.txt"'}
+    )
+
+
 @app.post("/api/scans/{sid}/cancel")
 def cancel_scan(sid: int, request: Request):
     with db() as c:
@@ -296,7 +347,7 @@ def make_report(sid: int):
         paths = reports.write_reports(sid)
     except KeyError:
         raise HTTPException(404, "Scan not found")
-    return {"html": f"/scans/{sid}/report.html", "json": f"/api/scans/{sid}/report.json", "files": {k: str(v) for k, v in paths.items()}}
+    return {"html": f"/scans/{sid}/report.html", "json": f"/api/scans/{sid}/report.json", "csv": f"/api/scans/{sid}/report.csv", "files": {k: str(v) for k, v in paths.items()}}
 
 
 @app.get("/api/scans/{sid}/report.json")
@@ -306,6 +357,15 @@ def report_json(sid: int):
     except KeyError:
         raise HTTPException(404, "Scan not found")
     return FileResponse(paths["json"], media_type="application/json", filename=f"reconforge-scan-{sid}.json")
+
+
+@app.get("/api/scans/{sid}/report.csv")
+def report_csv(sid: int):
+    try:
+        paths = reports.write_reports(sid)
+    except KeyError:
+        raise HTTPException(404, "Scan not found")
+    return FileResponse(paths["csv"], media_type="text/csv", filename=f"reconforge-scan-{sid}.csv")
 
 
 @app.get("/scans/{sid}/report.html", include_in_schema=False)

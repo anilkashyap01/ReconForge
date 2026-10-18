@@ -184,3 +184,8 @@ class IntegrationUpdate(BaseModel):
     enabled: bool | None = None
     api_key: str | None = Field(default=None, max_length=500)
     org_id: str | None = Field(default=None, max_length=200)
+
+
+class ScopeTestRequest(BaseModel):
+    candidate: str = Field(..., min_length=1, max_length=500)
+

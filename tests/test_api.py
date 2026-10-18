@@ -104,7 +104,11 @@ def test_full_scan_through_api_scheduler_and_reports(client, fake_tools):
     assert "default-src 'none'" in html.headers["content-security-policy"] and "Confirmed by analyst" in html.text
     j = client.get(f"/api/scans/{scan['id']}/report.json").json()
     assert j["scope"]["exclude"] == ["admin.example.com"] and j["findings"][0]["validation_status"] == "confirmed" and j["tools"]
+    csv_rep = client.get(f"/api/scans/{scan['id']}/report.csv")
+    assert csv_rep.status_code == 200 and "text/csv" in csv_rep.headers["content-type"]
+    assert "severity,title,asset,url" in csv_rep.text
     assert client.get("/api/scans/999/report.json").status_code == 404
+    assert client.get("/api/scans/999/report.csv").status_code == 404
     assert client.get(f"/api/overview").json()["open_findings"] == 1
     # a second scan can be compared with the first
     r2 = client.post(f"/api/projects/{pid}/scans", headers=H, json={"profile": "passive", "scope_entry_ids": [e["id"] for e in entries], "authorization_confirmed": True})
@@ -157,3 +161,62 @@ def test_scan_runs_endpoint_exposes_exact_commands_and_output(client, fake_tools
     assert runs[0]["tool"] == "subfinder" and runs[0]["argv"][0].endswith("subfinder") and "-d" in runs[0]["argv"]
     assert "api.example.com" in runs[0]["stdout_head"] and runs[0]["exit_code"] == 0
     assert client.get("/api/scans/9999/runs").status_code == 404
+
+
+def test_scope_boundary_verifier_and_deletion(client):
+    r = client.post("/api/projects", headers=H, json={
+        "name": "Scope Test Target",
+        "description": "testing",
+        "scope": ["*.example.com"],
+        "exclusions": ["admin.example.com"],
+        "authorization_confirmed": True,
+        "authorization_note": "authorized",
+    })
+    pid = r.json()["id"]
+
+    # In-scope subdomain
+    res1 = client.post(f"/api/projects/{pid}/scope/test", headers=H, json={"candidate": "api.example.com"}).json()
+    assert res1["in_scope"] is True
+    assert "matches *.example.com" in res1["reason"]
+
+    # Excluded host
+    res2 = client.post(f"/api/projects/{pid}/scope/test", headers=H, json={"candidate": "admin.example.com"}).json()
+    assert res2["in_scope"] is False
+    assert res2["is_exclusion"] is True
+    assert "excluded" in res2["reason"]
+
+    # Out of scope domain
+    res3 = client.post(f"/api/projects/{pid}/scope/test", headers=H, json={"candidate": "attacker.com"}).json()
+    assert res3["in_scope"] is False
+    assert "not in authorised scope" in res3["reason"]
+
+    # In-scope URL
+    res4 = client.post(f"/api/projects/{pid}/scope/test", headers=H, json={"candidate": "https://api.example.com/login"}).json()
+    assert res4["in_scope"] is True
+
+    # Delete exclusion entry
+    entries = client.get(f"/api/projects/{pid}").json()["scope"]
+    excl_entry = [e for e in entries if e["excluded"]][0]
+    del_r = client.delete(f"/api/projects/{pid}/scope/{excl_entry['id']}", headers=H)
+    assert del_r.status_code == 200
+
+    # Retest admin.example.com - now covered by *.example.com
+    res5 = client.post(f"/api/projects/{pid}/scope/test", headers=H, json={"candidate": "admin.example.com"}).json()
+    assert res5["in_scope"] is True
+
+
+def test_overview_ports_and_logs_download(client, fake_tools):
+    ov = client.get("/api/overview").json()
+    assert "ports" in ov and isinstance(ov["ports"], int)
+
+    pid = make_project(client).json()["id"]
+    eid = client.get(f"/api/projects/{pid}").json()["scope"][0]["id"]
+    sid = client.post(f"/api/projects/{pid}/scans", headers=H, json={"profile": "passive", "scope_entry_ids": [eid], "authorization_confirmed": True}).json()["id"]
+    wait_done(client, sid)
+
+    logs_resp = client.get(f"/api/scans/{sid}/logs.txt")
+    assert logs_resp.status_code == 200
+    assert "text/plain" in logs_resp.headers["content-type"]
+    assert f"reconforge-scan-{sid}-logs.txt" in logs_resp.headers["content-disposition"]
+    assert client.get("/api/scans/9999/logs.txt").status_code == 404
+

@@ -1,6 +1,8 @@
 """HTML and JSON scan reports. HTML is rendered by Jinja2 with autoescape; the JSON export is machine-readable."""
 from __future__ import annotations
 
+import csv
+import io
 import json
 import os
 from pathlib import Path
@@ -86,13 +88,41 @@ def render_html(report: dict[str, Any]) -> str:
     return env.get_template("report.html").render(r=report, sev_order=list(SEV_ORDER))
 
 
+def render_csv(report: dict[str, Any]) -> str:
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "severity", "title", "asset", "url", "confidence",
+        "validation_status", "source", "template_id", "first_seen", "last_seen"
+    ])
+    for f in report.get("findings", []):
+        writer.writerow([
+            f.get("severity", ""),
+            f.get("title", ""),
+            f.get("asset", ""),
+            f.get("url", ""),
+            f.get("confidence", ""),
+            f.get("validation_status", ""),
+            f.get("source", ""),
+            f.get("template_id", ""),
+            f.get("first_seen", ""),
+            f.get("last_seen", ""),
+        ])
+    return buf.getvalue()
+
+
 def write_reports(scan_id: int) -> dict[str, Path]:
     rep = build_report(scan_id)
     d = get_settings().reports_dir
     d.mkdir(parents=True, exist_ok=True)
-    paths = {"json": d / f"scan-{scan_id}.json", "html": d / f"scan-{scan_id}.html"}
+    paths = {
+        "json": d / f"scan-{scan_id}.json",
+        "html": d / f"scan-{scan_id}.html",
+        "csv": d / f"scan-{scan_id}.csv",
+    }
     paths["json"].write_text(redact(json.dumps(rep, indent=2, default=str)))
     paths["html"].write_text(redact(render_html(rep)))
+    paths["csv"].write_text(redact(render_csv(rep)))
     for p in paths.values():
         os.chmod(p, 0o600)
     return paths
