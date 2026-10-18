@@ -13,7 +13,7 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 const PROJECT_KEY = "reconforge_active_project";
 const NOTIF_KEY = "reconforge_notifications";
 
-// State
+// Global State
 let allProjects = [];
 let activePid = localStorage.getItem(PROJECT_KEY) || "";
 let activeScanData = null;
@@ -21,7 +21,19 @@ let currentFinding = null;
 let activeAssetDetail = null;
 let scanPollTimer = null;
 
-// Helpers
+// Cached section data for instant tab switching
+let cachedOverview = {};
+let cachedFindingsBySev = {};
+let reconAssetsData = [];
+let reconActiveTab = "all";
+let findingsData = [];
+let findingsFilterSev = "";
+let findingsFilterStatus = "";
+let activityActiveTab = "scans";
+let activitySelectedScanId = null;
+let recentScansData = [];
+
+// DOM Element Builder
 function h(tag, props, ...kids) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(props || {})) {
@@ -189,7 +201,7 @@ function closeModal() {
    Header Controller (Tabs, Search, Scanner Status, Notifications)
    ========================================================================== */
 function initHeader() {
-  // 1. Navigation Tabs
+  // Navigation Tabs (Desktop & Mobile)
   const navTabs = document.querySelectorAll(".nav-tab, .mobile-nav-item");
   navTabs.forEach((tab) => {
     tab.addEventListener("click", () => {
@@ -211,7 +223,7 @@ function initHeader() {
     });
   }
 
-  // 2. Global Search Input
+  // Global Search Input
   const searchInput = document.getElementById("global-search-input");
   const searchDropdown = document.getElementById("search-results-dropdown");
   let searchTimer = null;
@@ -245,7 +257,7 @@ function initHeader() {
     });
   }
 
-  // 3. Notifications
+  // Notifications
   const notifBtn = document.getElementById("notif-btn");
   const notifDropdown = document.getElementById("notif-dropdown");
   const clearNotifsBtn = document.getElementById("clear-notifs-btn");
@@ -264,11 +276,14 @@ function initHeader() {
     updateNotifDropdown();
   }
 
-  // 4. Settings Button
+  // Settings Button
   const settingsBtn = document.getElementById("settings-btn");
   if (settingsBtn) {
     settingsBtn.addEventListener("click", openSettingsModal);
   }
+
+  // ScrollSpy to automatically highlight active tab as user scrolls
+  initScrollSpy();
 }
 
 function setActiveNav(sectionName) {
@@ -281,7 +296,24 @@ function scrollToSection(sec) {
   const el = document.getElementById("section-" + sec);
   if (el) {
     el.scrollIntoView({ behavior: "smooth", block: "start" });
+    try {
+      history.pushState(null, "", sec === "overview" ? "/" : "/" + sec);
+    } catch (e) { /* ignore */ }
   }
+}
+
+function initScrollSpy() {
+  const sections = ["overview", "recon", "findings", "scanner", "reports", "targets"];
+  window.addEventListener("scroll", () => {
+    const scrollPos = window.scrollY + 100;
+    for (let i = sections.length - 1; i >= 0; i--) {
+      const el = document.getElementById("section-" + sections[i]);
+      if (el && el.offsetTop <= scrollPos) {
+        setActiveNav(sections[i]);
+        break;
+      }
+    }
+  }, { passive: true });
 }
 
 async function performGlobalSearch(query, container) {
@@ -409,13 +441,18 @@ function updateScannerHeaderStatus(activeScan) {
   }
 }
 
+function selectActiveProject(pid) {
+  activePid = String(pid);
+  localStorage.setItem(PROJECT_KEY, activePid);
+  loadSinglePageDashboard();
+}
+
 /* ==========================================================================
-   Single-Page Dashboard Renderer
+   Single-Page Dashboard Main Loader
    ========================================================================== */
 async function loadSinglePageDashboard() {
   clear(app);
 
-  // Fetch initial base overview
   let overview = null;
   try {
     [overview, allProjects] = await Promise.all([
@@ -430,7 +467,10 @@ async function loadSinglePageDashboard() {
     return;
   }
 
-  // Ensure an active project is selected if projects exist
+  cachedOverview = overview;
+  cachedFindingsBySev = overview.findings_by_severity || {};
+  recentScansData = overview.recent_scans || [];
+
   if (!activePid && allProjects.length) {
     activePid = String(allProjects[0].id);
     localStorage.setItem(PROJECT_KEY, activePid);
@@ -438,8 +478,8 @@ async function loadSinglePageDashboard() {
 
   let activeProject = allProjects.find((p) => String(p.id) === String(activePid)) || allProjects[0] || null;
 
-  // Active scan detection
-  const runningScan = (overview.recent_scans || []).find((s) => s.status === "running" || s.status === "queued");
+  // Active scan status
+  const runningScan = recentScansData.find((s) => s.status === "running" || s.status === "queued");
   updateScannerHeaderStatus(runningScan);
 
   // -------------------------------------------------------------------------
@@ -448,11 +488,7 @@ async function loadSinglePageDashboard() {
   const secControls = h("section", { id: "section-overview", class: "dashboard-card target-scan-controls", style: "padding:var(--sp-4)" });
   
   const targetSelect = h("select", {
-    onchange: () => {
-      activePid = targetSelect.value;
-      localStorage.setItem(PROJECT_KEY, activePid);
-      loadSinglePageDashboard();
-    }
+    onchange: () => selectActiveProject(targetSelect.value)
   });
 
   if (!allProjects.length) {
@@ -497,7 +533,6 @@ async function loadSinglePageDashboard() {
     )
   );
 
-  // Authorized Scope Details
   let scopeBanner = null;
   if (activeProject) {
     scopeBanner = h("div", { class: "scope-summary-banner" },
@@ -511,8 +546,8 @@ async function loadSinglePageDashboard() {
         h("button", {
           type: "button",
           class: "btn-link",
-          onclick: () => scrollToSection("targets")
-        }, "Manage Scope & Boundary Rules \u2192")
+          onclick: () => { setActiveNav("targets"); scrollToSection("targets"); }
+        }, "Manage Scope Rules \u2192")
       )
     );
   } else {
@@ -522,7 +557,6 @@ async function loadSinglePageDashboard() {
     );
   }
 
-  // Active scan live strip (if running)
   let activeScanStrip = null;
   if (runningScan) {
     activeScanStrip = h("div", { class: "active-scan-strip" },
@@ -560,13 +594,12 @@ async function loadSinglePageDashboard() {
   // SECTION B — Compact Statistics (Single row of 6 responsive cards)
   // -------------------------------------------------------------------------
   const totalFindings = overview.open_findings || 0;
-  const critFindings = (overview.findings_by_severity && overview.findings_by_severity.critical) || 0;
-  const highFindings = (overview.findings_by_severity && overview.findings_by_severity.high) || 0;
+  const critFindings = (cachedFindingsBySev && cachedFindingsBySev.critical) || 0;
 
   const secStats = h("div", { class: "stats-grid-6" },
     h("div", {
       class: "stat-kpi-card",
-      onclick: () => scrollToSection("targets"),
+      onclick: () => { setActiveNav("targets"); scrollToSection("targets"); },
       title: "View configured targets in scope"
     },
       h("div", { class: "stat-kpi-icon target" }, svgIcon(ICONS.target, 18)),
@@ -577,7 +610,7 @@ async function loadSinglePageDashboard() {
     ),
     h("div", {
       class: "stat-kpi-card",
-      onclick: () => { scrollToSection("recon"); switchReconTab("subdomains"); },
+      onclick: () => { setActiveNav("recon"); scrollToSection("recon"); switchReconTab("subdomains"); },
       title: "View discovered subdomains"
     },
       h("div", { class: "stat-kpi-icon" }, svgIcon(ICONS.assets, 18)),
@@ -588,7 +621,7 @@ async function loadSinglePageDashboard() {
     ),
     h("div", {
       class: "stat-kpi-card",
-      onclick: () => { scrollToSection("recon"); switchReconTab("hosts"); },
+      onclick: () => { setActiveNav("recon"); scrollToSection("recon"); switchReconTab("hosts"); },
       title: "View responding HTTP hosts"
     },
       h("div", { class: "stat-kpi-icon" }, svgIcon(ICONS.terminal, 18)),
@@ -599,7 +632,7 @@ async function loadSinglePageDashboard() {
     ),
     h("div", {
       class: "stat-kpi-card",
-      onclick: () => { scrollToSection("recon"); switchReconTab("ports"); },
+      onclick: () => { setActiveNav("recon"); scrollToSection("recon"); switchReconTab("ports"); },
       title: "View open ports"
     },
       h("div", { class: "stat-kpi-icon" }, svgIcon(ICONS.tools, 18)),
@@ -610,7 +643,7 @@ async function loadSinglePageDashboard() {
     ),
     h("div", {
       class: "stat-kpi-card",
-      onclick: () => { scrollToSection("findings"); filterFindingsBySev(""); },
+      onclick: () => { setActiveNav("findings"); scrollToSection("findings"); filterFindingsBySev(""); },
       title: "View all detected findings"
     },
       h("div", { class: "stat-kpi-icon" }, svgIcon(ICONS.findings, 18)),
@@ -621,7 +654,7 @@ async function loadSinglePageDashboard() {
     ),
     h("div", {
       class: "stat-kpi-card",
-      onclick: () => { scrollToSection("findings"); filterFindingsBySev("critical"); },
+      onclick: () => { setActiveNav("findings"); scrollToSection("findings"); filterFindingsBySev("critical"); },
       title: "Filter Critical severity findings"
     },
       h("div", { class: "stat-kpi-icon crit" }, svgIcon(ICONS.findings, 18)),
@@ -637,31 +670,38 @@ async function loadSinglePageDashboard() {
   // SECTION C — Reconnaissance Overview
   // -------------------------------------------------------------------------
   const secRecon = h("section", { id: "section-recon", class: "dashboard-card" });
-  renderReconSection(secRecon);
+  await renderReconSection(secRecon);
   app.append(secRecon);
 
   // -------------------------------------------------------------------------
   // SECTION D & E — Vulnerability Overview & Finding Details
   // -------------------------------------------------------------------------
   const secFindings = h("section", { id: "section-findings", class: "dashboard-card" });
-  renderFindingsSection(secFindings, overview.findings_by_severity || {});
+  await renderFindingsSection(secFindings);
   app.append(secFindings);
 
   // -------------------------------------------------------------------------
   // SECTION F — Activity and Scan Queue
   // -------------------------------------------------------------------------
   const secActivity = h("section", { id: "section-scanner", class: "dashboard-card" });
-  renderActivitySection(secActivity, overview.recent_scans || []);
+  await renderActivitySection(secActivity);
   app.append(secActivity);
 
   // -------------------------------------------------------------------------
-  // SECTION G — Reports and Targets
+  // SECTION G — Reports & Intelligence
   // -------------------------------------------------------------------------
-  const secReportsTargets = h("section", { id: "section-reports", class: "dashboard-card" });
-  renderReportsAndTargetsSection(secReportsTargets, activeProject);
-  app.append(secReportsTargets);
+  const secReports = h("section", { id: "section-reports", class: "dashboard-card" });
+  renderReportsSection(secReports);
+  app.append(secReports);
 
-  // Polling for active scan if running
+  // -------------------------------------------------------------------------
+  // SECTION H — Targets & Scope Management
+  // -------------------------------------------------------------------------
+  const secTargets = h("section", { id: "section-targets", class: "dashboard-card" });
+  await renderTargetsSection(secTargets, activeProject);
+  app.append(secTargets);
+
+  // Background active scan status poller
   clearInterval(scanPollTimer);
   if (runningScan) {
     scanPollTimer = setInterval(async () => {
@@ -682,16 +722,13 @@ async function loadSinglePageDashboard() {
 /* ==========================================================================
    Section C: Reconnaissance Component
    ========================================================================== */
-let reconActiveTab = "all";
-let reconAssetsData = [];
-
 async function renderReconSection(container) {
   clear(container);
 
   container.append(
     h("div", { class: "card-header" },
       h("div", { class: "card-title-group" },
-        h("h3", { class: "card-title" }, svgIcon(ICONS.assets, 18), "Reconnaissance Overview"),
+        h("h3", { class: "card-title" }, svgIcon(ICONS.assets, 18), "Reconnaissance & Discovered Assets"),
         h("p", { class: "card-subtitle" }, "Discovered subdomains, live hosts, open ports, DNS records, and services in authorized scope")
       ),
       h("div", { style: "display:flex;gap:8px" },
@@ -703,7 +740,10 @@ async function renderReconSection(container) {
         h("button", {
           type: "button",
           class: "btn secondary sm",
-          onclick: () => renderReconSection(container)
+          onclick: async () => {
+            await fetchReconData();
+            applyReconFilter();
+          }
         }, svgIcon(ICONS.refresh, 13), "Refresh")
       )
     )
@@ -715,19 +755,23 @@ async function renderReconSection(container) {
     placeholder: "Filter assets..."
   });
 
+  const tabDefs = [
+    { id: "all", label: "All Assets" },
+    { id: "subdomains", label: "Subdomains" },
+    { id: "hosts", label: "Live Hosts & URLs" },
+    { id: "ports", label: "Open Ports" },
+    { id: "dns", label: "DNS Records" }
+  ];
+
   const categoryTabs = h("div", { class: "category-tabs" },
-    ...[
-      { id: "all", label: "All Assets" },
-      { id: "subdomains", label: "Subdomains" },
-      { id: "hosts", label: "Live Hosts & URLs" },
-      { id: "ports", label: "Open Ports" },
-      { id: "dns", label: "DNS Records" }
-    ].map((t) => h("button", {
+    ...tabDefs.map((t) => h("button", {
       type: "button",
       class: "category-tab" + (reconActiveTab === t.id ? " active" : ""),
-      onclick: () => {
+      onclick: (e) => {
         reconActiveTab = t.id;
-        renderReconSection(container);
+        categoryTabs.querySelectorAll(".category-tab").forEach((b) => b.classList.remove("active"));
+        e.currentTarget.classList.add("active");
+        applyReconFilter();
       }
     }, t.label))
   );
@@ -735,7 +779,7 @@ async function renderReconSection(container) {
   const toolbar = h("div", { class: "section-toolbar" }, categoryTabs, filterInput);
   container.append(toolbar);
 
-  const tableContainer = h("div", { class: "table-wrap" },
+  const tableContainer = h("div", { class: "table-wrap", id: "recon-table-wrap" },
     h("p", { class: "muted small", style: "padding:20px;text-align:center" }, "Loading reconnaissance data...")
   );
   container.append(tableContainer);
@@ -743,16 +787,17 @@ async function renderReconSection(container) {
   const detailDrawer = h("div", { id: "asset-detail-drawer" });
   container.append(detailDrawer);
 
-  try {
-    let qs = "limit=100";
-    if (activePid) qs += "&project_id=" + activePid;
-    reconAssetsData = await api("/api/assets?" + qs);
-  } catch (e) {
-    clear(tableContainer).append(h("div", { class: "empty-state" }, "Could not load assets: " + e.message));
-    return;
+  async function fetchReconData() {
+    try {
+      let qs = "limit=200";
+      if (activePid) qs += "&project_id=" + activePid;
+      reconAssetsData = await api("/api/assets?" + qs);
+    } catch (e) {
+      clear(tableContainer).append(h("div", { class: "empty-state" }, "Could not load assets: " + e.message));
+    }
   }
 
-  function applyFilter() {
+  function applyReconFilter() {
     const q = filterInput.value.toLowerCase().trim();
     let rows = reconAssetsData;
 
@@ -762,6 +807,8 @@ async function renderReconSection(container) {
       rows = rows.filter((a) => a.ips || a.kind === "ip" || (a.endpoints && a.endpoints > 0));
     } else if (reconActiveTab === "ports") {
       rows = rows.filter((a) => a.ports && a.ports > 0);
+    } else if (reconActiveTab === "dns") {
+      rows = rows.filter((a) => a.ips || a.kind === "domain" || a.kind === "fqdn");
     }
 
     if (q) {
@@ -772,23 +819,21 @@ async function renderReconSection(container) {
     if (!rows.length) {
       tableContainer.append(h("div", { class: "empty-state" },
         svgIcon(ICONS.assets, 28),
-        h("p", {}, "No matching assets discovered yet. Run passive recon or import target scope.")
+        h("p", {}, "No matching assets found for this category.")
       ));
       return;
     }
 
+    // Dynamic headers based on tab
+    let headers = ["Asset / Host", "Type", "Resolved IPs", "Open Ports", "Findings", "Last Seen", "Actions"];
+    if (reconActiveTab === "ports") {
+      headers = ["Asset / Host", "Resolved IPs", "Open Ports Count", "Findings", "Last Seen", "Actions"];
+    } else if (reconActiveTab === "hosts") {
+      headers = ["Host / Endpoint", "Resolved IPs", "Open Ports", "Findings", "Last Seen", "Actions"];
+    }
+
     const t = h("table", { class: "compact-table" },
-      h("thead", {},
-        h("tr", {},
-          h("th", {}, "Asset / Host"),
-          h("th", {}, "Type"),
-          h("th", {}, "Resolved IPs"),
-          h("th", {}, "Open Ports"),
-          h("th", {}, "Findings"),
-          h("th", {}, "Last Seen"),
-          h("th", {}, "Actions")
-        )
-      ),
+      h("thead", {}, h("tr", {}, headers.map((hd) => h("th", {}, hd)))),
       h("tbody", {},
         rows.map((a) => h("tr", {
           class: activeAssetDetail && activeAssetDetail.id === a.id ? "selected" : "",
@@ -796,7 +841,7 @@ async function renderReconSection(container) {
           onclick: () => inspectAsset(a.id)
         },
           h("td", { class: "mono", style: "font-weight:600" }, a.value),
-          h("td", {}, h("span", { class: "scope-tag" }, a.kind || "asset")),
+          reconActiveTab !== "ports" && reconActiveTab !== "hosts" ? h("td", {}, h("span", { class: "scope-tag" }, a.kind || "asset")) : null,
           h("td", { class: "mono small muted" }, a.ips || "-"),
           h("td", {}, a.ports > 0 ? h("b", { style: "color:var(--primary)" }, String(a.ports)) : "0"),
           h("td", {}, a.findings > 0 ? h("span", { class: "sev-badge medium" }, String(a.findings)) : "0"),
@@ -815,14 +860,23 @@ async function renderReconSection(container) {
     tableContainer.append(t);
   }
 
-  filterInput.addEventListener("input", applyFilter);
-  applyFilter();
+  filterInput.addEventListener("input", applyReconFilter);
+  await fetchReconData();
+  applyReconFilter();
 }
 
 function switchReconTab(tab) {
   reconActiveTab = tab;
   const sec = document.getElementById("section-recon");
-  if (sec) renderReconSection(sec);
+  if (sec) {
+    const btn = sec.querySelector(`.category-tab[data-tab="${tab}"]`);
+    sec.querySelectorAll(".category-tab").forEach((b) => {
+      b.classList.toggle("active", b.textContent.toLowerCase().includes(tab.slice(0, 4)));
+    });
+    const filterInput = sec.querySelector(".table-filter-input");
+    if (filterInput) filterInput.dispatchEvent(new Event("input"));
+    else renderReconSection(sec);
+  }
 }
 
 async function inspectAsset(aid) {
@@ -844,7 +898,7 @@ async function inspectAsset(aid) {
           type: "button",
           class: "btn secondary sm",
           onclick: () => { activeAssetDetail = null; clear(drawer); }
-        }, svgIcon(ICONS.stop, 12), "Close")
+        }, svgIcon(ICONS.stop, 12), "Close Details")
       ),
       h("div", { class: "finding-meta-grid" },
         h("div", { class: "meta-item" },
@@ -866,7 +920,6 @@ async function inspectAsset(aid) {
       )
     );
 
-    // DNS Details
     if (a.dns && a.dns.length) {
       box.append(
         h("h4", { class: "detail-section-title" }, "DNS Records"),
@@ -879,7 +932,6 @@ async function inspectAsset(aid) {
       );
     }
 
-    // Open Ports
     if (a.ports && a.ports.length) {
       box.append(
         h("h4", { class: "detail-section-title" }, "Open Ports & Services"),
@@ -896,14 +948,13 @@ async function inspectAsset(aid) {
       );
     }
 
-    // HTTP Endpoints
     if (a.endpoints && a.endpoints.length) {
       box.append(
         h("h4", { class: "detail-section-title" }, "HTTP Endpoints"),
         h("div", { class: "table-wrap", style: "max-height:160px;overflow-y:auto" },
           h("table", { class: "compact-table" },
             h("thead", {}, h("tr", {}, h("th", {}, "URL"), h("th", {}, "Status"), h("th", {}, "Title"))),
-            h("tbody", {}, a.endpoints.slice(0, 15).map((e) => h("tr", {},
+            h("tbody", {}, a.endpoints.slice(0, 20).map((e) => h("tr", {},
               h("td", { class: "mono small" }, e.url),
               h("td", {}, e.status_code ? h("span", { class: "scope-tag" }, String(e.status_code)) : "-"),
               h("td", { class: "muted small" }, e.title || "-")
@@ -914,6 +965,7 @@ async function inspectAsset(aid) {
     }
 
     drawer.append(box);
+    drawer.scrollIntoView({ behavior: "smooth", block: "nearest" });
   } catch (e) {
     toast("Could not load asset: " + e.message, true);
   }
@@ -922,18 +974,14 @@ async function inspectAsset(aid) {
 /* ==========================================================================
    Section D & E: Vulnerability Overview & Finding Details
    ========================================================================== */
-let findingsFilterSev = "";
-let findingsFilterStatus = "";
-let findingsData = [];
-
-async function renderFindingsSection(container, bySev = {}) {
+async function renderFindingsSection(container) {
   clear(container);
 
   container.append(
     h("div", { class: "card-header" },
       h("div", { class: "card-title-group" },
-        h("h3", { class: "card-title" }, svgIcon(ICONS.findings, 18), "Vulnerabilities & Risk Findings"),
-        h("p", { class: "card-subtitle" }, "Scanner detections and validated security findings requiring human confirmation")
+        h("h3", { class: "card-title" }, svgIcon(ICONS.findings, 18), "Vulnerabilities & Security Findings"),
+        h("p", { class: "card-subtitle" }, "Scanner detections and validated findings requiring analyst review")
       ),
       h("div", { style: "display:flex;gap:8px" },
         h("button", {
@@ -944,27 +992,33 @@ async function renderFindingsSection(container, bySev = {}) {
         h("button", {
           type: "button",
           class: "btn secondary sm",
-          onclick: () => renderFindingsSection(container, bySev)
+          onclick: async () => {
+            await fetchFindingsData();
+            applyFindingsFilter();
+          }
         }, svgIcon(ICONS.refresh, 13), "Refresh")
       )
     )
   );
 
-  // Severity Pills Filter Bar
+  const sevDefs = [
+    { id: "", label: "ALL", count: null },
+    { id: "critical", label: "Critical", badge: "critical", count: cachedFindingsBySev.critical || 0 },
+    { id: "high", label: "High", badge: "high", count: cachedFindingsBySev.high || 0 },
+    { id: "medium", label: "Medium", badge: "medium", count: cachedFindingsBySev.medium || 0 },
+    { id: "low", label: "Low", badge: "low", count: cachedFindingsBySev.low || 0 },
+    { id: "info", label: "Info", badge: "info", count: cachedFindingsBySev.info || 0 }
+  ];
+
   const sevFilterBar = h("div", { class: "category-tabs" },
-    ...[
-      { id: "", label: "ALL", count: null },
-      { id: "critical", label: "Critical", badge: "critical", count: bySev.critical || 0 },
-      { id: "high", label: "High", badge: "high", count: bySev.high || 0 },
-      { id: "medium", label: "Medium", badge: "medium", count: bySev.medium || 0 },
-      { id: "low", label: "Low", badge: "low", count: bySev.low || 0 },
-      { id: "info", label: "Info", badge: "info", count: bySev.info || 0 }
-    ].map((item) => h("button", {
+    ...sevDefs.map((item) => h("button", {
       type: "button",
       class: "category-tab" + (findingsFilterSev === item.id ? " active" : ""),
-      onclick: () => {
+      onclick: (e) => {
         findingsFilterSev = item.id;
-        renderFindingsSection(container, bySev);
+        sevFilterBar.querySelectorAll(".category-tab").forEach((b) => b.classList.remove("active"));
+        e.currentTarget.classList.add("active");
+        applyFindingsFilter();
       }
     },
       item.label,
@@ -975,7 +1029,7 @@ async function renderFindingsSection(container, bySev = {}) {
   const statusSelect = h("select", {
     onchange: () => {
       findingsFilterStatus = statusSelect.value;
-      renderFindingsSection(container, bySev);
+      applyFindingsFilter();
     }
   },
     h("option", { value: "", selected: findingsFilterStatus === "" }, "Any Status"),
@@ -997,7 +1051,7 @@ async function renderFindingsSection(container, bySev = {}) {
   );
   container.append(toolbar);
 
-  const tableContainer = h("div", { class: "table-wrap" },
+  const tableContainer = h("div", { class: "table-wrap", id: "findings-table-wrap" },
     h("p", { class: "muted small", style: "padding:20px;text-align:center" }, "Loading findings...")
   );
   container.append(tableContainer);
@@ -1005,22 +1059,30 @@ async function renderFindingsSection(container, bySev = {}) {
   const detailBox = h("div", { id: "finding-detail-container" });
   container.append(detailBox);
 
-  try {
-    let qs = "limit=100";
-    if (activePid) qs += "&project_id=" + activePid;
-    if (findingsFilterSev) qs += "&severity=" + findingsFilterSev;
-    if (findingsFilterStatus) qs += "&status=" + findingsFilterStatus;
-    findingsData = await api("/api/findings?" + qs);
-  } catch (e) {
-    clear(tableContainer).append(h("div", { class: "empty-state" }, "Could not load findings: " + e.message));
-    return;
+  async function fetchFindingsData() {
+    try {
+      let qs = "limit=300";
+      if (activePid) qs += "&project_id=" + activePid;
+      findingsData = await api("/api/findings?" + qs);
+    } catch (e) {
+      clear(tableContainer).append(h("div", { class: "empty-state" }, "Could not load findings: " + e.message));
+    }
   }
 
-  function applyFilter() {
+  function applyFindingsFilter() {
     const q = searchInput.value.toLowerCase().trim();
     let rows = findingsData;
+
+    if (findingsFilterSev) {
+      rows = rows.filter((f) => (f.severity || "").toLowerCase() === findingsFilterSev);
+    }
+
+    if (findingsFilterStatus) {
+      rows = rows.filter((f) => (f.validation_status || "unvalidated") === findingsFilterStatus);
+    }
+
     if (q) {
-      rows = rows.filter((f) => f.title.toLowerCase().includes(q) || (f.asset && f.asset.toLowerCase().includes(q)));
+      rows = rows.filter((f) => f.title.toLowerCase().includes(q) || (f.asset && f.asset.toLowerCase().includes(q)) || (f.template_id && f.template_id.toLowerCase().includes(q)));
     }
 
     clear(tableContainer);
@@ -1073,19 +1135,26 @@ async function renderFindingsSection(container, bySev = {}) {
     tableContainer.append(t);
   }
 
-  searchInput.addEventListener("input", applyFilter);
-  applyFilter();
+  searchInput.addEventListener("input", applyFindingsFilter);
+  await fetchFindingsData();
+  applyFindingsFilter();
 }
 
 function filterFindingsBySev(sev) {
   findingsFilterSev = sev;
   const sec = document.getElementById("section-findings");
-  if (sec) renderFindingsSection(sec);
+  if (sec) {
+    sec.querySelectorAll(".category-tab").forEach((b) => {
+      if (!sev && b.textContent === "ALL") b.classList.add("active");
+      else if (sev && b.textContent.toLowerCase().startsWith(sev)) b.classList.add("active");
+      else b.classList.remove("active");
+    });
+    const searchInput = sec.querySelector(".table-filter-input");
+    if (searchInput) searchInput.dispatchEvent(new Event("input"));
+    else renderFindingsSection(sec);
+  }
 }
 
-// -------------------------------------------------------------------------
-// SECTION E: Selected Finding Details Panel
-// -------------------------------------------------------------------------
 async function inspectFinding(fid) {
   const container = document.getElementById("finding-detail-container");
   if (!container) return;
@@ -1114,7 +1183,6 @@ async function inspectFinding(fid) {
         }, svgIcon(ICONS.stop, 12), "Close Details")
       ),
 
-      // Metadata Overview Grid
       h("div", { class: "finding-meta-grid" },
         h("div", { class: "meta-item" },
           h("span", { class: "meta-item-label" }, "Affected Target / Host"),
@@ -1134,7 +1202,6 @@ async function inspectFinding(fid) {
         )
       ),
 
-      // Affected Endpoint & Reproduction Steps
       h("div", {},
         h("h4", { class: "detail-section-title" }, "Affected Endpoint & Reproduction Steps"),
         h("div", { class: "cmd-line-box" },
@@ -1150,12 +1217,11 @@ async function inspectFinding(fid) {
           h("button", {
             type: "button",
             class: "btn secondary sm",
-            onclick: () => copyToClipboard(curlCmd, "Curl reproduction command copied")
+            onclick: () => copyToClipboard(curlCmd, "Curl command copied")
           }, svgIcon(ICONS.copy, 12), "Copy Curl")
         )
       ),
 
-      // Detection Evidence
       h("div", {},
         h("h4", { class: "detail-section-title" }, "Detection Evidence"),
         h("div", { class: "code-evidence-block" },
@@ -1163,15 +1229,13 @@ async function inspectFinding(fid) {
         )
       ),
 
-      // Impact Assessment
       h("div", {},
         h("h4", { class: "detail-section-title" }, "Impact Assessment"),
         h("p", { class: "muted", style: "margin:0" },
-          f.description || "Potential security exposure identified on the target host. Automated scanner matches should be confirmed manually to verify whether the service or parameter poses an actionable security risk."
+          f.description || "Potential security exposure identified on the target host. Automated scanner detections should be validated manually to confirm exploitability."
         )
       ),
 
-      // Remediation Guidance & References
       h("div", {},
         h("h4", { class: "detail-section-title" }, "Recommended Remediation & References"),
         h("p", { style: "margin:0 0 6px" }, f.remediation || "Ensure sensitive endpoints require authentication and proper access controls. Keep software dependencies updated to supported releases."),
@@ -1180,7 +1244,6 @@ async function inspectFinding(fid) {
           : h("span", { class: "muted small" }, "No external reference advisories linked.")
       ),
 
-      // Analyst Actions Bar
       h("div", { class: "finding-actions-bar" },
         h("div", { style: "display:flex;align-items:center;gap:8px" },
           h("button", {
@@ -1199,7 +1262,7 @@ async function inspectFinding(fid) {
             onclick: () => updateFindingStatus(f.id, "fixed")
           }, "Mark Fixed")
         ),
-        h("span", { class: "muted small" }, "Validation status updates directly in local database")
+        h("span", { class: "muted small" }, "Status updates directly in local database")
       )
     );
 
@@ -1223,21 +1286,19 @@ async function updateFindingStatus(fid, newStatus) {
 /* ==========================================================================
    Section F: Activity & Scan Queue Component
    ========================================================================== */
-let activityActiveTab = "scans";
-
-async function renderActivitySection(container, recentScans = []) {
+async function renderActivitySection(container) {
   clear(container);
 
   container.append(
     h("div", { class: "card-header" },
       h("div", { class: "card-title-group" },
-        h("h3", { class: "card-title" }, svgIcon(ICONS.scans, 18), "Activity & Scan Queue"),
+        h("h3", { class: "card-title" }, svgIcon(ICONS.scans, 18), "Activity & Scan Execution"),
         h("p", { class: "card-subtitle" }, "Recent scanning executions, active jobs, tool diagnostics, and pipeline logs")
       ),
       h("button", {
         type: "button",
         class: "btn secondary sm",
-        onclick: () => renderActivitySection(container, recentScans)
+        onclick: () => renderActivitySection(container)
       }, svgIcon(ICONS.refresh, 13), "Refresh")
     )
   );
@@ -1246,169 +1307,209 @@ async function renderActivitySection(container, recentScans = []) {
     h("button", {
       type: "button",
       class: "category-tab" + (activityActiveTab === "scans" ? " active" : ""),
-      onclick: () => { activityActiveTab = "scans"; renderActivitySection(container, recentScans); }
-    }, "Recent Scans (" + recentScans.length + ")"),
+      onclick: (e) => {
+        activityActiveTab = "scans";
+        tabs.querySelectorAll(".category-tab").forEach((b) => b.classList.remove("active"));
+        e.currentTarget.classList.add("active");
+        renderActivityContent();
+      }
+    }, "Recent Scans (" + recentScansData.length + ")"),
     h("button", {
       type: "button",
       class: "category-tab" + (activityActiveTab === "runs" ? " active" : ""),
-      onclick: () => { activityActiveTab = "runs"; renderActivitySection(container, recentScans); }
+      onclick: (e) => {
+        activityActiveTab = "runs";
+        tabs.querySelectorAll(".category-tab").forEach((b) => b.classList.remove("active"));
+        e.currentTarget.classList.add("active");
+        renderActivityContent();
+      }
     }, "Tool Execution Matrix"),
     h("button", {
       type: "button",
       class: "category-tab" + (activityActiveTab === "logs" ? " active" : ""),
-      onclick: () => { activityActiveTab = "logs"; renderActivitySection(container, recentScans); }
+      onclick: (e) => {
+        activityActiveTab = "logs";
+        tabs.querySelectorAll(".category-tab").forEach((b) => b.classList.remove("active"));
+        e.currentTarget.classList.add("active");
+        renderActivityContent();
+      }
     }, "Scan Logs")
   );
 
   container.append(h("div", { class: "section-toolbar" }, tabs));
 
-  const contentBox = h("div", { style: "padding:0" });
+  const contentBox = h("div", { id: "activity-content-box", style: "padding:0" });
   container.append(contentBox);
 
-  if (activityActiveTab === "scans") {
-    if (!recentScans.length) {
-      contentBox.append(h("div", { class: "empty-state" },
-        svgIcon(ICONS.scans, 28),
-        h("p", {}, "No scans launched yet. Click 'Start Recon' or 'Start Scan' to begin.")
-      ));
-      return;
-    }
+  async function renderActivityContent() {
+    clear(contentBox);
 
-    const t = h("table", { class: "compact-table" },
-      h("thead", {},
-        h("tr", {},
-          h("th", {}, "Scan ID"),
-          h("th", {}, "Profile"),
-          h("th", {}, "Target Project"),
-          h("th", {}, "Status"),
-          h("th", {}, "Discovered"),
-          h("th", {}, "Started"),
-          h("th", {}, "Completed"),
-          h("th", {}, "Actions")
-        )
-      ),
-      h("tbody", {},
-        recentScans.map((s) => h("tr", {},
-          h("td", { class: "mono", style: "font-weight:600" }, "#" + s.id),
-          h("td", {}, h("span", { class: "scope-tag" }, s.profile)),
-          h("td", {}, s.project),
-          h("td", {}, h("span", { class: "status-pill " + s.status }, s.status)),
-          h("td", {}, s.summary && s.summary.assets ? s.summary.assets + " assets" : "0 assets"),
-          h("td", { class: "muted small" }, ago(s.created_at)),
-          h("td", { class: "muted small" }, s.completed_at ? ago(s.completed_at) : (s.status === "running" ? "in progress" : "-")),
-          h("td", {},
-            h("div", { style: "display:flex;gap:4px" },
-              h("a", {
-                class: "btn secondary sm",
-                href: "/scans/" + s.id + "/report.html",
-                target: "_blank",
-                rel: "noopener noreferrer"
-              }, svgIcon(ICONS.external, 12), "Report")
-            )
-          )
-        ))
-      )
-    );
-    contentBox.append(h("div", { class: "table-wrap" }, t));
-  } else if (activityActiveTab === "runs") {
-    // Tool runs for the latest scan
-    const latestScan = recentScans[0];
-    if (!latestScan) {
-      contentBox.append(h("div", { class: "empty-state" }, "No scan executions recorded yet."));
-      return;
-    }
-
-    try {
-      const runs = await api("/api/scans/" + latestScan.id + "/runs");
-      if (!runs.length) {
-        contentBox.append(h("div", { class: "empty-state" }, "No tool execution runs recorded for scan #" + latestScan.id));
+    if (activityActiveTab === "scans") {
+      if (!recentScansData.length) {
+        contentBox.append(h("div", { class: "empty-state" },
+          svgIcon(ICONS.scans, 28),
+          h("p", {}, "No scans launched yet. Click 'Start Recon' or 'Start Scan' to begin.")
+        ));
         return;
       }
 
-      const list = h("div", { style: "padding:var(--sp-4);display:flex;flex-direction:column;gap:12px" },
-        h("div", { class: "muted small", style: "margin-bottom:4px" }, "Tool execution history for Scan #" + latestScan.id + " (" + latestScan.profile + "):"),
-        ...runs.map((r) => {
-          const cmdStr = (r.argv || []).join(" ");
-          return h("div", { class: "dashboard-card", style: "padding:12px" },
-            h("div", { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:8px" },
-              h("div", { style: "display:flex;align-items:center;gap:8px" },
-                h("b", { class: "mono" }, r.stage_name),
-                h("span", { class: "status-pill " + r.status }, r.status)
+      const t = h("table", { class: "compact-table" },
+        h("thead", {},
+          h("tr", {},
+            h("th", {}, "Scan ID"),
+            h("th", {}, "Profile"),
+            h("th", {}, "Target Project"),
+            h("th", {}, "Status"),
+            h("th", {}, "Discovered"),
+            h("th", {}, "Started"),
+            h("th", {}, "Completed"),
+            h("th", {}, "Actions")
+          )
+        ),
+        h("tbody", {},
+          recentScansData.map((s) => h("tr", {},
+            h("td", { class: "mono", style: "font-weight:600" }, "#" + s.id),
+            h("td", {}, h("span", { class: "scope-tag" }, s.profile)),
+            h("td", {}, s.project),
+            h("td", {}, h("span", { class: "status-pill " + s.status }, s.status)),
+            h("td", {}, s.summary && s.summary.assets ? s.summary.assets + " assets" : "0 assets"),
+            h("td", { class: "muted small" }, ago(s.created_at)),
+            h("td", { class: "muted small" }, s.completed_at ? ago(s.completed_at) : (s.status === "running" ? "in progress" : "-")),
+            h("td", {},
+              h("div", { style: "display:flex;gap:4px" },
+                h("button", {
+                  type: "button",
+                  class: "btn secondary sm",
+                  onclick: () => {
+                    activitySelectedScanId = s.id;
+                    activityActiveTab = "runs";
+                    tabs.querySelectorAll(".category-tab").forEach((b) => b.classList.toggle("active", b.textContent.includes("Matrix")));
+                    renderActivityContent();
+                  }
+                }, "View Runs"),
+                h("button", {
+                  type: "button",
+                  class: "btn secondary sm",
+                  onclick: () => {
+                    activitySelectedScanId = s.id;
+                    activityActiveTab = "logs";
+                    tabs.querySelectorAll(".category-tab").forEach((b) => b.classList.toggle("active", b.textContent.includes("Logs")));
+                    renderActivityContent();
+                  }
+                }, "Logs"),
+                h("a", {
+                  class: "btn secondary sm",
+                  href: "/scans/" + s.id + "/report.html",
+                  target: "_blank",
+                  rel: "noopener noreferrer"
+                }, svgIcon(ICONS.external, 12), "Report")
+              )
+            )
+          ))
+        )
+      );
+      contentBox.append(h("div", { class: "table-wrap" }, t));
+    } else if (activityActiveTab === "runs") {
+      const scanIdToView = activitySelectedScanId || (recentScansData[0] && recentScansData[0].id);
+      if (!scanIdToView) {
+        contentBox.append(h("div", { class: "empty-state" }, "No scan executions recorded yet."));
+        return;
+      }
+
+      // Scan selector dropdown for tool runs
+      const scanSelect = h("select", {
+        style: "margin-bottom:12px",
+        onchange: (e) => {
+          activitySelectedScanId = parseInt(e.target.value, 10);
+          renderActivityContent();
+        }
+      },
+        recentScansData.map((s) => h("option", { value: String(s.id), selected: s.id === scanIdToView }, "Scan #" + s.id + " (" + s.profile + ") - " + s.project))
+      );
+
+      try {
+        const runs = await api("/api/scans/" + scanIdToView + "/runs");
+        const list = h("div", { style: "padding:var(--sp-4);display:flex;flex-direction:column;gap:12px" },
+          h("div", { style: "display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px" },
+            h("div", { class: "muted small" }, "Tool execution history for Scan #" + scanIdToView + ":"),
+            scanSelect
+          ),
+          ...runs.map((r) => {
+            const cmdStr = (r.argv || []).join(" ");
+            return h("div", { class: "dashboard-card", style: "padding:12px" },
+              h("div", { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:8px" },
+                h("div", { style: "display:flex;align-items:center;gap:8px" },
+                  h("b", { class: "mono" }, r.stage_name),
+                  h("span", { class: "status-pill " + r.status }, r.status)
+                ),
+                h("span", { class: "muted small mono" }, "exit " + r.exit_code + " \u00B7 " + r.stdout_bytes + " bytes")
               ),
-              h("span", { class: "muted small mono" }, "exit " + r.exit_code + " \u00B7 " + r.stdout_bytes + " bytes")
-            ),
-            h("div", { class: "cmd-line-box" },
-              h("span", { class: "mono small" }, "$ " + cmdStr),
-              h("button", {
-                type: "button",
-                class: "btn secondary sm",
-                onclick: () => copyToClipboard(cmdStr, "Command copied")
-              }, svgIcon(ICONS.copy, 12), "Copy")
-            ),
-            r.stderr_tail ? h("pre", { class: "code-evidence-block", style: "margin-top:6px;max-height:100px" }, r.stderr_tail) : null
-          );
-        })
-      );
-      contentBox.append(list);
-    } catch (e) {
-      contentBox.append(h("div", { class: "empty-state" }, "Could not load runs: " + e.message));
-    }
-  } else if (activityActiveTab === "logs") {
-    const latestScan = recentScans[0];
-    if (!latestScan) {
-      contentBox.append(h("div", { class: "empty-state" }, "No scan logs available."));
-      return;
-    }
-    try {
-      const logData = await api("/api/scans/" + latestScan.id + "/logs");
-      const logs = (logData && logData.logs) || [];
-      const term = h("div", { class: "terminal-output", style: "margin:var(--sp-4)" },
-        logs.length ? logs.map((l) => (l.created_at ? "[" + l.created_at.slice(11, 19) + "] " : "") + l.message).join("\n") : "(No log lines recorded for scan #" + latestScan.id + ")"
-      );
-      contentBox.append(term);
-    } catch (e) {
-      contentBox.append(h("div", { class: "empty-state" }, "Could not load logs: " + e.message));
+              h("div", { class: "cmd-line-box" },
+                h("span", { class: "mono small" }, "$ " + cmdStr),
+                h("button", {
+                  type: "button",
+                  class: "btn secondary sm",
+                  onclick: () => copyToClipboard(cmdStr, "Command copied")
+                }, svgIcon(ICONS.copy, 12), "Copy")
+              ),
+              r.stderr_tail ? h("pre", { class: "code-evidence-block", style: "margin-top:6px;max-height:100px" }, r.stderr_tail) : null
+            );
+          })
+        );
+        contentBox.append(list);
+      } catch (e) {
+        contentBox.append(h("div", { class: "empty-state" }, "Could not load runs: " + e.message));
+      }
+    } else if (activityActiveTab === "logs") {
+      const scanIdToView = activitySelectedScanId || (recentScansData[0] && recentScansData[0].id);
+      if (!scanIdToView) {
+        contentBox.append(h("div", { class: "empty-state" }, "No scan logs available."));
+        return;
+      }
+      try {
+        const logData = await api("/api/scans/" + scanIdToView + "/logs");
+        const logs = (logData && logData.logs) || [];
+        const term = h("div", { class: "terminal-output", style: "margin:var(--sp-4)" },
+          logs.length ? logs.map((l) => (l.created_at ? "[" + l.created_at.slice(11, 19) + "] " : "") + l.message).join("\n") : "(No log lines recorded for scan #" + scanIdToView + ")"
+        );
+        contentBox.append(term);
+      } catch (e) {
+        contentBox.append(h("div", { class: "empty-state" }, "Could not load logs: " + e.message));
+      }
     }
   }
+
+  renderActivityContent();
 }
 
 /* ==========================================================================
-   Section G: Reports and Targets Component
+   Section G: Reports Component (#section-reports)
    ========================================================================== */
-let reportsTargetsTab = "reports";
-
-async function renderReportsAndTargetsSection(container, activeProject) {
+function renderReportsSection(container) {
   clear(container);
+
+  const scanSelect = h("select", { style: "min-width:220px" });
+  if (recentScansData.length) {
+    recentScansData.forEach((s) => {
+      scanSelect.append(h("option", { value: String(s.id) }, "Scan #" + s.id + " (" + s.profile + ") - " + s.project));
+    });
+  } else {
+    scanSelect.append(h("option", { value: "" }, "No scans completed yet"));
+    scanSelect.disabled = true;
+  }
 
   container.append(
     h("div", { class: "card-header" },
       h("div", { class: "card-title-group" },
-        h("h3", { class: "card-title" }, svgIcon(ICONS.reports, 18), "Reports, Targets & Scope Management"),
-        h("p", { class: "card-subtitle" }, "Generate technical summaries, export security findings, and manage target boundaries")
+        h("h3", { class: "card-title" }, svgIcon(ICONS.reports, 18), "Reports & Security Exports"),
+        h("p", { class: "card-subtitle" }, "Generate technical audit reports, executive summaries, and export data in HTML, JSON, or CSV formats")
+      ),
+      h("div", { style: "display:flex;align-items:center;gap:8px" },
+        h("label", { class: "muted small", style: "font-weight:600" }, "SELECT SCAN:"),
+        scanSelect
       )
-    )
-  );
-
-  const tabs = h("div", { class: "category-tabs" },
-    h("button", {
-      type: "button",
-      class: "category-tab" + (reportsTargetsTab === "reports" ? " active" : ""),
-      onclick: () => { reportsTargetsTab = "reports"; renderReportsAndTargetsSection(container, activeProject); }
-    }, "Reports & Exports"),
-    h("button", {
-      type: "button",
-      class: "category-tab" + (reportsTargetsTab === "targets" ? " active" : ""),
-      onclick: () => { reportsTargetsTab = "targets"; renderReportsAndTargetsSection(container, activeProject); }
-    }, "Target Scope & Rules")
-  );
-
-  container.append(h("div", { class: "section-toolbar" }, tabs));
-
-  const contentBox = h("div", { style: "padding:var(--sp-4)" });
-  container.append(contentBox);
-
-  if (reportsTargetsTab === "reports") {
-    contentBox.append(
+    ),
+    h("div", { style: "padding:var(--sp-4)" },
       h("div", { style: "display:grid;grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));gap:var(--sp-4)" },
         // Technical Report
         h("div", { class: "dashboard-card", style: "padding:16px" },
@@ -1418,28 +1519,35 @@ async function renderReportsAndTargetsSection(container, activeProject) {
             h("button", {
               type: "button",
               class: "btn primary sm",
+              disabled: !recentScansData.length,
               onclick: () => {
-                if (activeScanData && activeScanData.id) window.open("/scans/" + activeScanData.id + "/report.html", "_blank");
-                else window.open("/scans", "_self");
+                const sid = scanSelect.value || (recentScansData[0] && recentScansData[0].id);
+                if (sid) window.open("/scans/" + sid + "/report.html", "_blank");
+                else toast("Select a valid scan first", true);
               }
             }, svgIcon(ICONS.external, 13), "Open HTML Report"),
             h("button", {
               type: "button",
               class: "btn secondary sm",
-              onclick: () => downloadCSV("findings-export.csv", findingsData)
-            }, svgIcon(ICONS.download, 13), "Export Findings CSV")
+              disabled: !recentScansData.length,
+              onclick: () => {
+                const sid = scanSelect.value || (recentScansData[0] && recentScansData[0].id);
+                if (sid) window.open("/api/scans/" + sid + "/report.json", "_blank");
+                else toast("Select a valid scan first", true);
+              }
+            }, svgIcon(ICONS.download, 13), "Download JSON")
           )
         ),
         // Executive Summary
         h("div", { class: "dashboard-card", style: "padding:16px" },
-          h("h4", { style: "margin:0 0 6px" }, "Executive Risk Summary"),
-          h("p", { class: "muted small", style: "margin:0 0 14px" }, "High-level risk breakdown, vulnerability posture distribution, and scope validation overview."),
+          h("h4", { style: "margin:0 0 6px" }, "Executive Posture Summary & CSVs"),
+          h("p", { class: "muted small", style: "margin:0 0 14px" }, "Export structured findings and discovered assets inventory directly to CSV spreadsheets."),
           h("div", { style: "display:flex;gap:8px;flex-wrap:wrap" },
             h("button", {
               type: "button",
               class: "btn secondary sm",
-              onclick: () => toast("Executive summary report prepared")
-            }, svgIcon(ICONS.reports, 13), "Generate Summary"),
+              onclick: () => downloadCSV("findings-export.csv", findingsData)
+            }, svgIcon(ICONS.download, 13), "Export Findings CSV"),
             h("button", {
               type: "button",
               class: "btn secondary sm",
@@ -1448,119 +1556,146 @@ async function renderReportsAndTargetsSection(container, activeProject) {
           )
         )
       )
-    );
-  } else if (reportsTargetsTab === "targets") {
-    if (!activeProject) {
-      contentBox.append(h("div", { class: "empty-state" }, "No target selected."));
-      return;
-    }
+    )
+  );
+}
 
-    try {
-      const proj = await api("/api/projects/" + activeProject.id);
-      const scopeRules = proj.scope || [];
+/* ==========================================================================
+   Section H: Targets & Authorized Scope Component (#section-targets)
+   ========================================================================== */
+async function renderTargetsSection(container, activeProject) {
+  clear(container);
 
-      const inScope = scopeRules.filter((s) => !s.is_exclusion);
-      const outScope = scopeRules.filter((s) => s.is_exclusion);
+  container.append(
+    h("div", { class: "card-header" },
+      h("div", { class: "card-title-group" },
+        h("h3", { class: "card-title" }, svgIcon(ICONS.target, 18), "Targets & Scope Management"),
+        h("p", { class: "card-subtitle" }, "Define authorized target boundaries, manage in-scope rules, out-of-scope exclusions, and verify testing permissions")
+      ),
+      h("button", {
+        type: "button",
+        class: "btn primary sm",
+        onclick: openAddTargetModal
+      }, svgIcon(ICONS.plus, 13), "+ Add New Target")
+    )
+  );
 
-      const targetBox = h("div", { style: "display:flex;flex-direction:column;gap:16px" },
-        h("div", { style: "display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px" },
-          h("div", {},
-            h("h3", { style: "margin:0" }, proj.name),
-            h("p", { class: "muted small", style: "margin:2px 0 0" }, proj.description || "Authorized scope boundary for penetration testing & bug bounty recon.")
-          ),
-          h("div", { style: "display:flex;gap:8px" },
-            h("button", {
-              type: "button",
-              class: "btn secondary sm",
-              onclick: () => openAddScopeModal(proj.id)
-            }, svgIcon(ICONS.plus, 13), "Add Scope Rule"),
-            h("button", {
-              type: "button",
-              class: "btn danger sm",
-              onclick: async () => {
-                if (!confirm("Delete target project \"" + proj.name + "\" and all its data?")) return;
-                try {
-                  await api("/api/projects/" + proj.id, "DELETE");
-                  toast("Target deleted");
-                  localStorage.removeItem(PROJECT_KEY);
-                  activePid = "";
-                  loadSinglePageDashboard();
-                } catch (e) { toast(e.message, true); }
-              }
-            }, "Delete Target")
-          )
+  const contentBox = h("div", { style: "padding:var(--sp-4)" });
+  container.append(contentBox);
+
+  if (!activeProject) {
+    contentBox.append(h("div", { class: "empty-state" },
+      svgIcon(ICONS.target, 28),
+      h("p", {}, "No target configured yet. Click '+ Add New Target' to define an authorized scope.")
+    ));
+    return;
+  }
+
+  try {
+    const proj = await api("/api/projects/" + activeProject.id);
+    const scopeRules = proj.scope || [];
+
+    const inScope = scopeRules.filter((s) => !s.is_exclusion);
+    const outScope = scopeRules.filter((s) => s.is_exclusion);
+
+    const targetBox = h("div", { style: "display:flex;flex-direction:column;gap:16px" },
+      h("div", { style: "display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px" },
+        h("div", {},
+          h("h3", { style: "margin:0" }, proj.name),
+          h("p", { class: "muted small", style: "margin:2px 0 0" }, proj.description || "Authorized scope boundary for penetration testing & bug bounty recon.")
         ),
-
-        // Rules Grid
-        h("div", { style: "display:grid;grid-template-columns:1fr 1fr;gap:16px" },
-          // In-Scope
-          h("div", { class: "dashboard-card", style: "padding:14px" },
-            h("h4", { style: "margin:0 0 8px;color:#059669" }, "In-Scope Boundaries (" + inScope.length + ")"),
-            inScope.length
-              ? h("ul", { style: "margin:0;padding-left:18px" }, inScope.map((s) => h("li", { class: "mono small" }, s.target)))
-              : h("p", { class: "muted small", style: "margin:0" }, "No in-scope rules defined.")
-          ),
-          // Exclusions
-          h("div", { class: "dashboard-card", style: "padding:14px" },
-            h("h4", { style: "margin:0 0 8px;color:var(--critical)" }, "Out-of-Scope Exclusions (" + outScope.length + ")"),
-            outScope.length
-              ? h("ul", { style: "margin:0;padding-left:18px" }, outScope.map((s) => h("li", { class: "mono small" }, s.target)))
-              : h("p", { class: "muted small", style: "margin:0" }, "No exclusions defined.")
-          )
-        ),
-
-        // Scope Boundary Tester
-        h("div", { class: "dashboard-card", style: "padding:14px;background:var(--panel-hover)" },
-          h("h4", { style: "margin:0 0 4px" }, "Scope Boundary Verifier"),
-          h("p", { class: "muted small", style: "margin:0 0 8px" }, "Verify if a hostname or IP address is currently authorized under backend scope rules before scanning:"),
-          h("div", { style: "display:flex;gap:8px" },
-            h("input", {
-              type: "text",
-              id: "scope-tester-input",
-              placeholder: "test.example.com or 192.168.1.5",
-              style: "flex:1"
-            }),
-            h("button", {
-              type: "button",
-              class: "btn secondary sm",
-              onclick: () => {
-                const val = document.getElementById("scope-tester-input").value.trim();
-                const resEl = document.getElementById("scope-tester-result");
-                if (!val) return;
-                const isIn = inScope.some((s) => {
-                  if (s.target.startsWith("*.")) {
-                    const apex = s.target.slice(2);
-                    return val.endsWith("." + apex);
-                  }
-                  return s.target === val;
-                });
-                const isOut = outScope.some((s) => s.target === val);
-                if (isOut) {
-                  resEl.textContent = "\u2716 EXCLUDED: Out-of-scope rule matches (" + val + ")";
-                  resEl.style.color = "var(--critical)";
-                } else if (isIn) {
-                  resEl.textContent = "\u2714 IN SCOPE: Authorized for testing (" + val + ")";
-                  resEl.style.color = "#059669";
-                } else {
-                  resEl.textContent = "\u26A0 NOT IN SCOPE: Boundary rejected under rule set";
-                  resEl.style.color = "var(--muted)";
-                }
-              }
-            }, "Test Boundary")
-          ),
-          h("div", { id: "scope-tester-result", class: "small mono", style: "margin-top:6px;font-weight:600" })
+        h("div", { style: "display:flex;gap:8px" },
+          h("button", {
+            type: "button",
+            class: "btn secondary sm",
+            onclick: () => openAddScopeModal(proj.id)
+          }, svgIcon(ICONS.plus, 13), "Add Scope Rule"),
+          h("button", {
+            type: "button",
+            class: "btn danger sm",
+            onclick: async () => {
+              if (!confirm("Delete target project \"" + proj.name + "\" and all its assets and findings?")) return;
+              try {
+                await api("/api/projects/" + proj.id, "DELETE");
+                toast("Target deleted");
+                localStorage.removeItem(PROJECT_KEY);
+                activePid = "";
+                loadSinglePageDashboard();
+              } catch (e) { toast(e.message, true); }
+            }
+          }, "Delete Target")
         )
-      );
+      ),
 
-      contentBox.append(targetBox);
-    } catch (e) {
-      contentBox.append(h("div", { class: "empty-state" }, "Could not load target scope: " + e.message));
-    }
+      // In-Scope & Out-of-Scope Rules Lists
+      h("div", { style: "display:grid;grid-template-columns:1fr 1fr;gap:16px" },
+        // In-Scope
+        h("div", { class: "dashboard-card", style: "padding:14px" },
+          h("h4", { style: "margin:0 0 8px;color:#059669" }, "In-Scope Boundaries (" + inScope.length + ")"),
+          inScope.length
+            ? h("ul", { style: "margin:0;padding-left:18px" }, inScope.map((s) => h("li", { class: "mono small" }, s.target)))
+            : h("p", { class: "muted small", style: "margin:0" }, "No in-scope rules defined.")
+        ),
+        // Exclusions
+        h("div", { class: "dashboard-card", style: "padding:14px" },
+          h("h4", { style: "margin:0 0 8px;color:var(--critical)" }, "Out-of-Scope Exclusions (" + outScope.length + ")"),
+          outScope.length
+            ? h("ul", { style: "margin:0;padding-left:18px" }, outScope.map((s) => h("li", { class: "mono small" }, s.target)))
+            : h("p", { class: "muted small", style: "margin:0" }, "No exclusions defined.")
+        )
+      ),
+
+      // Interactive Scope Boundary Tester
+      h("div", { class: "dashboard-card", style: "padding:14px;background:var(--panel-hover)" },
+        h("h4", { style: "margin:0 0 4px" }, "Scope Boundary Verifier"),
+        h("p", { class: "muted small", style: "margin:0 0 8px" }, "Verify if a hostname or IP address is currently authorized under backend scope rules before scanning:"),
+        h("div", { style: "display:flex;gap:8px" },
+          h("input", {
+            type: "text",
+            id: "scope-tester-input",
+            placeholder: "test.example.com or 192.168.1.5",
+            style: "flex:1"
+          }),
+          h("button", {
+            type: "button",
+            class: "btn secondary sm",
+            onclick: () => {
+              const val = document.getElementById("scope-tester-input").value.trim();
+              const resEl = document.getElementById("scope-tester-result");
+              if (!val) return;
+              const isIn = inScope.some((s) => {
+                if (s.target.startsWith("*.")) {
+                  const apex = s.target.slice(2);
+                  return val.endsWith("." + apex);
+                }
+                return s.target === val;
+              });
+              const isOut = outScope.some((s) => s.target === val);
+              if (isOut) {
+                resEl.textContent = "\u2716 EXCLUDED: Out-of-scope rule matches (" + val + ")";
+                resEl.style.color = "var(--critical)";
+              } else if (isIn) {
+                resEl.textContent = "\u2714 IN SCOPE: Authorized for testing (" + val + ")";
+                resEl.style.color = "#059669";
+              } else {
+                resEl.textContent = "\u26A0 NOT IN SCOPE: Boundary rejected under rule set";
+                resEl.style.color = "var(--muted)";
+              }
+            }
+          }, "Test Boundary")
+        ),
+        h("div", { id: "scope-tester-result", class: "small mono", style: "margin-top:6px;font-weight:600" })
+      )
+    );
+
+    contentBox.append(targetBox);
+  } catch (e) {
+    contentBox.append(h("div", { class: "empty-state" }, "Could not load target scope: " + e.message));
   }
 }
 
 /* ==========================================================================
-   Modals: Target Creation, Scan Launch, Settings
+   Modals: Target Creation, Scan Launch, Settings with Tabs
    ========================================================================== */
 function openAddTargetModal() {
   const nameInput = h("input", { type: "text", placeholder: "e.g. Acme Corp Bug Bounty" });
@@ -1799,6 +1934,9 @@ async function launchQuickRecon(project) {
   }
 }
 
+/* ==========================================================================
+   Settings Modal with Interactive Tabs
+   ========================================================================== */
 async function openSettingsModal() {
   let settings = null;
   let tools = [];
@@ -1812,78 +1950,170 @@ async function openSettingsModal() {
     return;
   }
 
+  const modalContainer = h("div", {});
+
+  // Tab Header in Modal
+  let activeModalTab = "limits";
+  const tabButtons = [
+    { id: "limits", label: "Rate Limits" },
+    { id: "intel", label: "Threat Intel" },
+    { id: "tools", label: "Tool Health Matrix" },
+    { id: "about", label: "About & Developer" }
+  ];
+
+  const modalNav = h("div", { class: "modal-tabs" },
+    ...tabButtons.map((t) => h("button", {
+      type: "button",
+      class: "modal-tab" + (activeModalTab === t.id ? " active" : ""),
+      onclick: (e) => {
+        activeModalTab = t.id;
+        modalNav.querySelectorAll(".modal-tab").forEach((b) => b.classList.remove("active"));
+        e.currentTarget.classList.add("active");
+        modalContainer.querySelectorAll(".modal-pane").forEach((p) => {
+          p.classList.toggle("active", p.dataset.pane === t.id);
+        });
+      }
+    }, t.label))
+  );
+
+  modalContainer.append(modalNav);
+
+  // Pane 1: Rate Limits
   const rpsInput = h("input", { type: "text", value: String(settings.limits.requests_per_second || 2) });
   const hostRpsInput = h("input", { type: "text", value: String(settings.limits.per_host_rps || 2) });
   const maxJobsInput = h("input", { type: "text", value: String(settings.limits.max_concurrent_target_jobs || 1) });
   const timeoutInput = h("input", { type: "text", value: String(settings.limits.max_scan_seconds || 900) });
 
-  const modalBody = h("div", {},
-    h("div", { class: "dashboard-card", style: "padding:14px;margin-bottom:14px" },
-      h("h4", { style: "margin:0 0 10px" }, "Scanner Rate Limits (Conservative Defaults)"),
-      h("div", { style: "display:grid;grid-template-columns:1fr 1fr;gap:12px" },
-        h("div", { class: "form-field" }, h("label", {}, "Max Req / Sec:"), rpsInput),
-        h("div", { class: "form-field" }, h("label", {}, "Per-Host Req / Sec:"), hostRpsInput),
-        h("div", { class: "form-field" }, h("label", {}, "Max Concurrent Jobs:"), maxJobsInput),
-        h("div", { class: "form-field" }, h("label", {}, "Timeout (seconds):"), timeoutInput)
-      ),
-      h("div", { style: "margin-top:10px;text-align:right" },
+  const paneLimits = h("div", { class: "modal-pane active", "data-pane": "limits" },
+    h("h4", { style: "margin:0" }, "Scanner Rate Limits (Conservative Defaults)"),
+    h("p", { class: "muted small", style: "margin:0" }, "ReconForge runs target-touching tools safely with built-in token-bucket rate limiting."),
+    h("div", { style: "display:grid;grid-template-columns:1fr 1fr;gap:12px" },
+      h("div", { class: "form-field" }, h("label", {}, "Max Requests / Second:"), rpsInput),
+      h("div", { class: "form-field" }, h("label", {}, "Per-Host Requests / Second:"), hostRpsInput),
+      h("div", { class: "form-field" }, h("label", {}, "Max Concurrent Jobs:"), maxJobsInput),
+      h("div", { class: "form-field" }, h("label", {}, "Scan Timeout (seconds):"), timeoutInput)
+    ),
+    h("div", { style: "text-align:right;margin-top:10px" },
+      h("button", {
+        type: "button",
+        class: "btn primary sm",
+        onclick: async () => {
+          try {
+            await api("/api/settings/limits", "PUT", {
+              limits: {
+                requests_per_second: parseFloat(rpsInput.value),
+                per_host_rps: parseFloat(hostRpsInput.value),
+                max_concurrent_target_jobs: parseInt(maxJobsInput.value, 10),
+                max_scan_seconds: parseInt(timeoutInput.value, 10)
+              }
+            });
+            toast("Rate limits saved successfully");
+          } catch (e) { toast(e.message, true); }
+        }
+      }, "Save Rate Limits")
+    )
+  );
+
+  // Pane 2: Threat Intelligence
+  const shodanObj = (settings.integrations || []).find((x) => x.name === "shodan") || {};
+  const urlscanObj = (settings.integrations || []).find((x) => x.name === "urlscan") || {};
+
+  const shodanKeyInput = h("input", { type: "text", placeholder: shodanObj.configured ? "•••••••• (API key configured)" : "Enter Shodan API key" });
+  const urlscanKeyInput = h("input", { type: "text", placeholder: urlscanObj.configured ? "•••••••• (API key configured)" : "Enter urlscan.io API key" });
+
+  const paneIntel = h("div", { class: "modal-pane", "data-pane": "intel" },
+    h("h4", { style: "margin:0" }, "External OSINT & Threat Intelligence"),
+    h("p", { class: "muted small", style: "margin:0" }, "Credentials live only in local data/secrets.json (0600) and are never uploaded or logged."),
+    h("div", { class: "dashboard-card", style: "padding:12px" },
+      h("b", {}, "Shodan.io"),
+      h("div", { style: "display:flex;gap:8px;margin-top:6px" },
+        shodanKeyInput,
         h("button", {
           type: "button",
-          class: "btn primary sm",
+          class: "btn secondary sm",
           onclick: async () => {
+            const key = shodanKeyInput.value.trim();
+            if (key) {
+              try {
+                await api("/api/integrations/shodan", "PUT", { enabled: true, api_key: key });
+                toast("Shodan key saved");
+              } catch (e) { toast(e.message, true); }
+            }
             try {
-              await api("/api/settings/limits", "PUT", {
-                limits: {
-                  requests_per_second: parseFloat(rpsInput.value),
-                  per_host_rps: parseFloat(hostRpsInput.value),
-                  max_concurrent_target_jobs: parseInt(maxJobsInput.value, 10),
-                  max_scan_seconds: parseInt(timeoutInput.value, 10)
-                }
-              });
-              toast("Rate limits saved");
+              const res = await api("/api/integrations/shodan/test", "POST");
+              toast(res.ok ? "Shodan connection verified!" : "Shodan test failed: " + res.message, !res.ok);
             } catch (e) { toast(e.message, true); }
           }
-        }, "Save Limits")
+        }, "Save & Test")
       )
     ),
-
-    // Tools Health Matrix
-    h("div", { class: "dashboard-card", style: "padding:14px;margin-bottom:14px" },
-      h("h4", { style: "margin:0 0 8px" }, "Tool Health Matrix"),
-      h("div", { class: "table-wrap", style: "max-height:180px;overflow-y:auto" },
-        h("table", { class: "compact-table" },
-          h("thead", {}, h("tr", {}, h("th", {}, "Tool"), h("th", {}, "Status"), h("th", {}, "Version"), h("th", {}, "Role"))),
-          h("tbody", {}, tools.map((t) => h("tr", {},
-            h("td", { class: "mono", style: "font-weight:600" }, t.name),
-            h("td", {}, h("span", { class: t.detected ? "scope-badge-safe" : "sev-badge critical" }, t.detected ? "Detected" : "Missing")),
-            h("td", { class: "mono small" }, t.version || "-"),
-            h("td", { class: "muted small" }, t.role)
-          )))
-        )
-      )
-    ),
-
-    // Developer Attribution
-    h("div", { class: "dashboard-card", style: "padding:14px;background:var(--panel-hover)" },
-      h("div", { style: "display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px" },
-        h("div", {},
-          h("b", {}, "ReconForge v1.0.0"),
-          h("p", { class: "muted small", style: "margin:0" }, "Local-first attack surface & reconnaissance platform.")
-        ),
-        h("span", { class: "scope-badge-safe" }, "Developed by Anil Kashyap")
-      ),
-      h("div", { style: "display:flex;gap:10px;margin-top:10px" },
-        h("a", { class: "btn secondary sm", href: "https://github.com/anilkashyap01", target: "_blank", rel: "noopener noreferrer" },
-          svgIcon(ICONS.terminal, 13), "GitHub: anilkashyap01"
-        ),
-        h("a", { class: "btn secondary sm", href: "https://linkedin.com/in/anilkashyap01", target: "_blank", rel: "noopener noreferrer" },
-          svgIcon(ICONS.target, 13), "LinkedIn: anilkashyap01"
-        )
+    h("div", { class: "dashboard-card", style: "padding:12px" },
+      h("b", {}, "urlscan.io"),
+      h("div", { style: "display:flex;gap:8px;margin-top:6px" },
+        urlscanKeyInput,
+        h("button", {
+          type: "button",
+          class: "btn secondary sm",
+          onclick: async () => {
+            const key = urlscanKeyInput.value.trim();
+            if (key) {
+              try {
+                await api("/api/integrations/urlscan", "PUT", { enabled: true, api_key: key });
+                toast("urlscan key saved");
+              } catch (e) { toast(e.message, true); }
+            }
+            try {
+              const res = await api("/api/integrations/urlscan/test", "POST");
+              toast(res.ok ? "urlscan connection verified!" : "urlscan test failed: " + res.message, !res.ok);
+            } catch (e) { toast(e.message, true); }
+          }
+        }, "Save & Test")
       )
     )
   );
 
-  openModal("Settings & Tools", modalBody, [
+  // Pane 3: Tool Health Matrix
+  const paneTools = h("div", { class: "modal-pane", "data-pane": "tools" },
+    h("h4", { style: "margin:0" }, "Tool Health & Environment Diagnostics"),
+    h("p", { class: "muted small", style: "margin:0" }, "Status of CLI scanner executables installed in system PATH on Kali Linux:"),
+    h("div", { class: "table-wrap", style: "max-height:260px;overflow-y:auto" },
+      h("table", { class: "compact-table" },
+        h("thead", {}, h("tr", {}, h("th", {}, "Tool"), h("th", {}, "Status"), h("th", {}, "Version"), h("th", {}, "Role"))),
+        h("tbody", {}, tools.map((t) => h("tr", {},
+          h("td", { class: "mono", style: "font-weight:600" }, t.name),
+          h("td", {}, h("span", { class: t.detected ? "scope-badge-safe" : "sev-badge critical" }, t.detected ? "Detected" : "Missing")),
+          h("td", { class: "mono small" }, t.version || "-"),
+          h("td", { class: "muted small" }, t.role)
+        )))
+      )
+    )
+  );
+
+  // Pane 4: About & Developer
+  const paneAbout = h("div", { class: "modal-pane", "data-pane": "about" },
+    h("div", { style: "display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px" },
+      h("div", {},
+        h("h3", { style: "margin:0" }, "ReconForge v1.0.0"),
+        h("p", { class: "muted small", style: "margin:2px 0 0" }, "Local-first attack surface & reconnaissance orchestration platform.")
+      ),
+      h("span", { class: "scope-badge-safe" }, "Developed by Anil Kashyap")
+    ),
+    h("p", { class: "muted small", style: "line-height:1.6" },
+      "ReconForge runs strictly on loopback (127.0.0.1) with backend-enforced scope validation, zero cloud telemetry, safe conservative rate limits, and structured SQLite storage."
+    ),
+    h("div", { style: "display:flex;gap:10px;margin-top:6px" },
+      h("a", { class: "btn secondary sm", href: "https://github.com/anilkashyap01", target: "_blank", rel: "noopener noreferrer" },
+        svgIcon(ICONS.terminal, 14), "GitHub: anilkashyap01"
+      ),
+      h("a", { class: "btn secondary sm", href: "https://linkedin.com/in/anilkashyap01", target: "_blank", rel: "noopener noreferrer" },
+        svgIcon(ICONS.target, 14), "LinkedIn: anilkashyap01"
+      )
+    )
+  );
+
+  modalContainer.append(paneLimits, paneIntel, paneTools, paneAbout);
+
+  openModal("Settings & Tools", modalContainer, [
     h("button", { type: "button", class: "btn secondary", onclick: closeModal }, "Close")
   ], true);
 }
@@ -1894,14 +2124,14 @@ async function openSettingsModal() {
 (async () => {
   initHeader();
 
-  // Route handlers for direct hits (/projects, /scans, /findings, /assets, /tools, /settings)
   const p = ctx.page || "overview";
   if (p === "settings") {
-    setTimeout(openSettingsModal, 200);
+    setTimeout(openSettingsModal, 250);
   }
 
   await loadSinglePageDashboard();
 
+  // Route scrolling based on URL direct hits
   if (p === "assets") {
     scrollToSection("recon");
     setActiveNav("recon");
@@ -1914,5 +2144,7 @@ async function openSettingsModal() {
   } else if (p === "projects" || p === "project") {
     scrollToSection("targets");
     setActiveNav("targets");
+  } else if (p === "tools") {
+    openSettingsModal();
   }
 })();
